@@ -1,4 +1,10 @@
 import os
+import sys
+import argparse
+import glob
+from datetime import datetime
+import questionary # The interactive menu library
+
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["OMP_NUM_THREADS"] = "1"
 
@@ -13,19 +19,56 @@ import random
 from drqn_model import DRQN
 from replay_buffer import SequentialReplayBuffer
 
-# --- Hyperparameters ---
-BATCH_SIZE = 16
-SEQ_LENGTH = 5
-MEMORY_CAPACITY = 2000
-MAX_STEPS = 100000
-GAMMA = 0.99           # How much the AI cares about future rewards
-EPSILON_START = 1.0    # 100% Random at the beginning
-EPSILON_END = 0.05     # 5% Random at the end
-EPSILON_DECAY = 50000  # How many steps it takes to go from Start to End
+SAVE_DIR = "models"
+VERSION_NAME = "v2_dense_rewards"
 
-def train():
+def get_available_models():
+    """Scans the models folder for existing brains"""
+    os.makedirs(SAVE_DIR, exist_ok=True)
+    models = glob.glob(os.path.join(SAVE_DIR, "*.pth"))
+    models.sort(key=os.path.getmtime, reverse=True) # Newest first
+    return ["None (Start Fresh)"] + models
+
+def interactive_setup():
+    """Runs the interactive Up/Down arrow menu if no CLI args are provided"""
+    print("\n" + "="*50)
+    print("🤖 WAREHOUSE DRQN TRAINING DASHBOARD 🤖")
+    print("="*50 + "\n")
+
+    model_choices = get_available_models()
+    
+    selected_model = questionary.select(
+        "Which Brain do you want to load?",
+        choices=model_choices
+    ).ask()
+
+    # Prompt for key hyper-parameters
+    epsilon_start = float(questionary.text("Starting Epsilon (1.0 = 100% Random, 0.05 = Mostly Smart):", default="1.0").ask())
+    learning_rate = float(questionary.text("Learning Rate (e.g., 0.0001):", default="0.0001").ask())
+    batch_size = int(questionary.text("Batch Size (Movies to study at once):", default="16").ask())
+    gamma = float(questionary.text("Gamma (Future Reward Discount 0.0-0.99):", default="0.99").ask())
+    max_steps = int(questionary.text("Max Training Steps:", default="100000").ask())
+
+    if selected_model == "None (Start Fresh)":
+        selected_model = None
+
+    return selected_model, epsilon_start, learning_rate, batch_size, gamma, max_steps
+
+def parse_cli_args():
+    """Handles standard command line arguments like -e 0.5"""
+    parser = argparse.ArgumentParser(description="Train the Warehouse DRQN")
+    parser.add_argument('-m', '--model', type=str, default=None, help="Path to a .pth file to load")
+    parser.add_argument('-e', '--epsilon', type=float, default=1.0, help="Starting Epsilon (0.0 to 1.0)")
+    parser.add_argument('-lr', '--learning_rate', type=float, default=1e-4, help="Learning Rate")
+    parser.add_argument('-b', '--batch_size', type=int, default=16, help="Batch Size")
+    parser.add_argument('-g', '--gamma', type=float, default=0.99, help="Gamma value")
+    parser.add_argument('-s', '--steps', type=int, default=100000, help="Max Training Steps")
+    return parser.parse_args()
+
+# --- THE MAIN TRAINING LOOP ---
+def run_training(load_model_path, epsilon_start, learning_rate, batch_size, gamma, max_steps):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Starting DRQN Training on: {device}")
+    print(f"\n🚀 Booting up DRQN Training on: {device} 🚀")
 
     print("Waiting for Unity Environment... Please press PLAY in the Editor!")
     env = UnityEnvironment(file_name=None, seed=42)
@@ -37,21 +80,34 @@ def train():
     print(f"Observation size (Vectors + Raycasts): {total_obs_size}")
 
     q_network = DRQN(input_size=total_obs_size).to(device)
-    optimizer = optim.Adam(q_network.parameters(), lr=1e-4)
-    memory = SequentialReplayBuffer(capacity=MEMORY_CAPACITY, sequence_length=SEQ_LENGTH)
+    
+    # LOAD THE MODEL
+    if load_model_path and os.path.exists(load_model_path):
+        q_network.load_state_dict(torch.load(load_model_path))
+        print(f"\n✅ SUCCESS: Loaded existing brain from {load_model_path}!")
+    else:
+        print("\n🌱 Starting with a brand new random brain.")
 
+    optimizer = optim.Adam(q_network.parameters(), lr=learning_rate)
+    
+    # Hardcoded structural parameters
+    seq_length = 10
+    memory_capacity = 5000
+    epsilon_end = 0.05
+    epsilon_decay = int(max_steps * 0.8) # Decay over 80% of the training time
+
+    memory = SequentialReplayBuffer(capacity=memory_capacity, sequence_length=seq_length)
     active_episodes = {} 
-    epsilon = EPSILON_START
+    epsilon = epsilon_start
 
-    print("\n--- Real Training Started! ---")
-    print("Watch the robots in Unity. They will start random, but slowly get smarter.")
+    print("\n--- Training Loop Started! ---")
     print("Press Ctrl+C to save and quit.\n")
     
     try:
-        for step in range(MAX_STEPS):
+        for step in range(max_steps):
             decision_steps, terminal_steps = env.get_steps(behavior_name)
 
-            # --- A. RECORD OBSERVATIONS ---
+            # A. RECORD OBSERVATIONS
             current_obs = {}
             for agent_id in decision_steps.agent_id:
                 agent_idx = decision_steps.agent_id_to_index[agent_id]
@@ -61,24 +117,22 @@ def train():
                 if agent_id not in active_episodes:
                     active_episodes[agent_id] = [] 
 
-            # --- B. EPSILON-GREEDY ACTION SELECTION ---
+            # B. EPSILON-GREEDY ACTION
             actions_to_send = []
             agent_ids_taking_action = []
 
             for agent_id in decision_steps.agent_id:
                 if random.random() < epsilon:
-                    # EXPLORE: Take a random action
                     act = [random.randint(0,2), random.randint(0,2), random.randint(0,1), random.randint(0,2)]
                 else:
-                    # EXPLOIT: Ask the Neural Network!
                     with torch.no_grad():
                         obs_tensor = torch.FloatTensor(current_obs[agent_id]).unsqueeze(0).unsqueeze(0).to(device)
                         q_vals, _ = q_network(obs_tensor)
                         act = [
-                            torch.argmax(q_vals[0]).item(), # Move
-                            torch.argmax(q_vals[1]).item(), # Turn
-                            torch.argmax(q_vals[2]).item(), # Interact
-                            torch.argmax(q_vals[3]).item()  # Forks
+                            torch.argmax(q_vals[0]).item(),
+                            torch.argmax(q_vals[1]).item(),
+                            torch.argmax(q_vals[2]).item(),
+                            torch.argmax(q_vals[3]).item() 
                         ]
 
                 actions_to_send.append(act)
@@ -88,10 +142,10 @@ def train():
                 action_tuple = ActionTuple(discrete=np.array(actions_to_send, dtype=np.int32))
                 env.set_actions(behavior_name, action_tuple)
 
-            # --- C. STEP ENVIRONMENT ---
+            # C. STEP ENVIRONMENT
             env.step()
 
-            # --- D. GATHER REWARDS & SAVE ---
+            # D. GATHER REWARDS
             new_decision_steps, new_terminal_steps = env.get_steps(behavior_name)
 
             for idx, agent_id in enumerate(agent_ids_taking_action):
@@ -112,50 +166,53 @@ def train():
                     memory.push_episode(active_episodes[agent_id])
                     active_episodes[agent_id] = [] 
 
-            # --- E. DECAY EPSILON ---
-            epsilon = max(EPSILON_END, EPSILON_START - step * ((EPSILON_START - EPSILON_END) / EPSILON_DECAY))
+            # E. DECAY EPSILON
+            epsilon = max(epsilon_end, epsilon_start - step * ((epsilon_start - epsilon_end) / epsilon_decay))
 
-            # --- F. TRAIN THE NEURAL NETWORK (BELLMAN EQUATION) ---
-            if len(memory) > BATCH_SIZE:
-                b_obs, b_actions, b_rewards, b_next_obs, b_dones = memory.sample(BATCH_SIZE)
+            # F. TRAIN NEURAL NETWORK
+            if len(memory) > batch_size:
+                b_obs, b_actions, b_rewards, b_next_obs, b_dones = memory.sample(batch_size)
 
-                # 1. What does the brain think right now?
                 current_q_vals, _ = q_network(b_obs)
-                
-                # 2. What will the brain think in the next frame?
                 with torch.no_grad():
                     next_q_vals, _ = q_network(b_next_obs)
 
                 total_loss = 0
-
-                # 3. Calculate the error (loss) for all 4 Action Branches separately
                 for branch_idx in range(4):
-                    # Get the Q-values for the specific actions the robot actually took
                     branch_actions = b_actions[:, :, branch_idx].unsqueeze(-1)
                     current_q = current_q_vals[branch_idx].gather(2, branch_actions).squeeze(-1)
-                    
-                    # Bellman Equation Math: Reward + (Gamma * Max Future Q)
                     max_next_q = next_q_vals[branch_idx].max(dim=2)[0]
-                    target_q = b_rewards + GAMMA * max_next_q * (1 - b_dones)
-
-                    # Compare what it thought with what actually happened
+                    target_q = b_rewards + gamma * max_next_q * (1 - b_dones)
                     total_loss += F.mse_loss(current_q, target_q)
 
-                # 4. Backpropagation! Adjust the weights to make the brain smarter.
                 optimizer.zero_grad()
                 total_loss.backward()
                 optimizer.step()
 
-            # Print updates
             if step % 500 == 0 and step > 0:
-                print(f"Step: {step} | Mem: {len(memory)} | Epsilon: {epsilon:.2f} | Loss: {total_loss.item():.4f}")
+                print(f"Step: {step} | Mem: {len(memory)} | Eps: {epsilon:.2f} | Loss: {total_loss.item():.4f}")
 
     except KeyboardInterrupt:
-        print("\nTraining interrupted by user. Saving model...")
-        torch.save(q_network.state_dict(), "drqn_warehouse_model.pth")
-        print("Model saved as 'drqn_warehouse_model.pth'.")
+            print("\nTraining interrupted by user. Saving model...")
+            timestamp = datetime.now().strftime("%m-%d_%H-%M")
+            
+            # Build the ultimate parameter-packed filename
+            param_string = f"lr{learning_rate}_b{batch_size}_g{gamma}_seq{seq_length}"
+            save_filename = f"drqn_{VERSION_NAME}_{param_string}_{timestamp}.pth"
+            full_save_path = os.path.join(SAVE_DIR, save_filename)
+            
+            torch.save(q_network.state_dict(), full_save_path)
+            print(f"💾 Model successfully saved at: {full_save_path}")
     finally:
         env.close()
 
 if __name__ == '__main__':
-    train()
+    # Logic to decide between Interactive Menu or CLI flags
+    if len(sys.argv) > 1:
+        # User typed something like: python train.py -e 0.5 -b 32
+        args = parse_cli_args()
+        run_training(args.model, args.epsilon, args.learning_rate, args.batch_size, args.gamma, args.steps)
+    else:
+        # User just typed: python train.py
+        model_path, eps, lr, batch, gamma, steps = interactive_setup()
+        run_training(model_path, eps, lr, batch, gamma, steps)
