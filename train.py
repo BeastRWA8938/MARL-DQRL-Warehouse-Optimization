@@ -100,8 +100,14 @@ def run_training(load_model_path, epsilon_start, learning_rate, batch_size, gamm
 
     memory = SequentialReplayBuffer(capacity=memory_capacity, sequence_length=seq_length)
     active_episodes = {} 
-    # ... your existing setup code ...
+    
+    # --- NEW: Reward Trackers ---
+    agent_episode_rewards = {}  # Tracks the running score for each individual robot
+    cumulative_team_reward = 0  # Tracks the total score of the whole warehouse
+    episodes_completed = 0      # Counts how many times robots have finished an episode
+
     epsilon = epsilon_start
+    print("\n--- Training Loop Started! ---")
 
     # --- NEW: START TENSORBOARD WRITER ---
     timestamp = datetime.now().strftime("%m-%d_%H-%M")
@@ -157,13 +163,19 @@ def run_training(load_model_path, epsilon_start, learning_rate, batch_size, gamm
             # D. GATHER REWARDS
             new_decision_steps, new_terminal_steps = env.get_steps(behavior_name)
 
+            # 1. Agents still alive
             for idx, agent_id in enumerate(agent_ids_taking_action):
                 if agent_id in new_decision_steps.agent_id:
                     agent_idx = new_decision_steps.agent_id_to_index[agent_id]
                     next_o = np.concatenate([obs[agent_idx] for obs in new_decision_steps.obs])
                     reward = new_decision_steps.reward[agent_idx]
+                    
+                    # --- NEW: Add reward to running total ---
+                    agent_episode_rewards[agent_id] = agent_episode_rewards.get(agent_id, 0) + reward
+                    
                     active_episodes[agent_id].append((current_obs[agent_id], actions_to_send[idx], reward, next_o, False))
 
+            # 2. Agents that crashed or delivered
             for agent_id in new_terminal_steps.agent_id:
                 if agent_id in current_obs and agent_id in agent_ids_taking_action:
                     idx = agent_ids_taking_action.index(agent_id)
@@ -171,9 +183,20 @@ def run_training(load_model_path, epsilon_start, learning_rate, batch_size, gamm
                     next_o = np.concatenate([obs[agent_idx] for obs in new_terminal_steps.obs])
                     reward = new_terminal_steps.reward[agent_idx]
                     
+                    # --- NEW: Finalize reward and log to TensorBoard! ---
+                    final_score = agent_episode_rewards.get(agent_id, 0) + reward
+                    cumulative_team_reward += final_score
+                    episodes_completed += 1
+
+                    # Write individual agent score
+                    writer.add_scalar(f"2_Agents/Agent_{agent_id}_Score", final_score, step)
+                    
+                    # Reset this specific agent's score for its next life
+                    agent_episode_rewards[agent_id] = 0 
+                    
                     active_episodes[agent_id].append((current_obs[agent_id], actions_to_send[idx], reward, next_o, True))
                     memory.push_episode(active_episodes[agent_id])
-                    active_episodes[agent_id] = [] 
+                    active_episodes[agent_id] = []
 
             # E. DECAY EPSILON
             epsilon = max(epsilon_end, epsilon_start - step * ((epsilon_start - epsilon_end) / epsilon_decay))
@@ -201,10 +224,11 @@ def run_training(load_model_path, epsilon_start, learning_rate, batch_size, gamm
             if step % 500 == 0 and step > 0:
                 print(f"Step: {step} | Mem: {len(memory)} | Eps: {epsilon:.2f} | Loss: {total_loss.item():.4f}")
                 
-                # --- NEW: SEND DATA TO THE WEBPAGE ---
                 writer.add_scalar("1_Training/Loss", total_loss.item(), step)
                 writer.add_scalar("1_Training/Epsilon", epsilon, step)
-                writer.add_scalar("2_System/Memory_Stored", len(memory), step)
+                
+                # --- NEW: Log the team's total cumulative performance ---
+                writer.add_scalar("3_Warehouse/Cumulative_Team_Reward", cumulative_team_reward, step)
 
     except KeyboardInterrupt:
             print("\nTraining interrupted by user. Saving model...")
