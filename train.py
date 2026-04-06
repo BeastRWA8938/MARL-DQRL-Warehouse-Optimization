@@ -5,6 +5,7 @@ import glob
 from datetime import datetime
 import questionary # The interactive menu library
 
+
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["OMP_NUM_THREADS"] = "1"
 
@@ -18,6 +19,7 @@ import random
 
 from drqn_model import DRQN
 from replay_buffer import SequentialReplayBuffer
+from torch.utils.tensorboard import SummaryWriter # <--- NEW: Import TensorBoard
 
 SAVE_DIR = "models"
 VERSION_NAME = "v2_dense_rewards"
@@ -98,7 +100,14 @@ def run_training(load_model_path, epsilon_start, learning_rate, batch_size, gamm
 
     memory = SequentialReplayBuffer(capacity=memory_capacity, sequence_length=seq_length)
     active_episodes = {} 
+    # ... your existing setup code ...
     epsilon = epsilon_start
+
+    # --- NEW: START TENSORBOARD WRITER ---
+    timestamp = datetime.now().strftime("%m-%d_%H-%M")
+    log_dir = os.path.join("runs", f"drqn_{VERSION_NAME}_lr{learning_rate}_{timestamp}")
+    writer = SummaryWriter(log_dir=log_dir)
+    print(f"📊 TensorBoard started! Logs saving to: {log_dir}")
 
     print("\n--- Training Loop Started! ---")
     print("Press Ctrl+C to save and quit.\n")
@@ -191,6 +200,11 @@ def run_training(load_model_path, epsilon_start, learning_rate, batch_size, gamm
 
             if step % 500 == 0 and step > 0:
                 print(f"Step: {step} | Mem: {len(memory)} | Eps: {epsilon:.2f} | Loss: {total_loss.item():.4f}")
+                
+                # --- NEW: SEND DATA TO THE WEBPAGE ---
+                writer.add_scalar("1_Training/Loss", total_loss.item(), step)
+                writer.add_scalar("1_Training/Epsilon", epsilon, step)
+                writer.add_scalar("2_System/Memory_Stored", len(memory), step)
 
     except KeyboardInterrupt:
             print("\nTraining interrupted by user. Saving model...")
@@ -204,6 +218,7 @@ def run_training(load_model_path, epsilon_start, learning_rate, batch_size, gamm
             torch.save(q_network.state_dict(), full_save_path)
             print(f"💾 Model successfully saved at: {full_save_path}")
     finally:
+        writer.close()
         env.close()
 
 if __name__ == '__main__':
