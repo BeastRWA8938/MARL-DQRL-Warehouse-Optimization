@@ -106,7 +106,12 @@ def run_training(load_model_path, epsilon_start, learning_rate, batch_size, gamm
     cumulative_team_reward = 0  # Tracks the total score of the whole warehouse
     episodes_completed = 0      # Counts how many times robots have finished an episode
 
+    memory = SequentialReplayBuffer(capacity=memory_capacity, sequence_length=seq_length)
+    active_episodes = {} 
     epsilon = epsilon_start
+    
+    total_loss = torch.tensor(0.0) # <--- NEW: Prevents the crash before memory fills up!
+
     print("\n--- Training Loop Started! ---")
 
     # --- NEW: START TENSORBOARD WRITER ---
@@ -115,7 +120,6 @@ def run_training(load_model_path, epsilon_start, learning_rate, batch_size, gamm
     writer = SummaryWriter(log_dir=log_dir)
     print(f"📊 TensorBoard started! Logs saving to: {log_dir}")
 
-    print("\n--- Training Loop Started! ---")
     print("Press Ctrl+C to save and quit.\n")
     
     try:
