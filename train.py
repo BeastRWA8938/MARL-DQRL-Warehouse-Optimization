@@ -78,8 +78,10 @@ def run_training(load_model_path, epsilon_start, learning_rate, batch_size, gamm
     behavior_name = list(env.behavior_specs.keys())[0]
 
     decision_steps, _ = env.get_steps(behavior_name)
-    total_obs_size = sum([obs.shape[1] for obs in decision_steps.obs])
-    print(f"Observation size (Vectors + Raycasts): {total_obs_size}")
+    
+    # MAGIC FIX 1: Hide the 5 human keys BEFORE building the brain or loading saves
+    total_obs_size = sum([obs.shape[1] for obs in decision_steps.obs]) - 5
+    print(f"True PyTorch Observation size: {total_obs_size}")
 
     q_network = DRQN(input_size=total_obs_size).to(device)
     
@@ -124,26 +126,42 @@ def run_training(load_model_path, epsilon_start, learning_rate, batch_size, gamm
     
     try:
         for step in range(max_steps):
-            decision_steps, terminal_steps = env.get_steps(behavior_name)
-
-            # A. RECORD OBSERVATIONS
+            # --- A. RECORD OBSERVATIONS & SLICE OFF THE HACK ---
             current_obs = {}
+            human_overrides = {} # Track which agents the human is driving
+            
             for agent_id in decision_steps.agent_id:
                 agent_idx = decision_steps.agent_id_to_index[agent_id]
-                combined_obs = np.concatenate([obs[agent_idx] for obs in decision_steps.obs])
-                current_obs[agent_id] = combined_obs
+                raw_obs = np.concatenate([obs[agent_idx] for obs in decision_steps.obs])
+                
+                # Slice the array! 
+                true_obs = raw_obs[:-5]   # Everything EXCEPT the last 5 numbers (The Real Vision)
+                human_data = raw_obs[-5:] # ONLY the last 5 numbers (The Secret Signals)
+                
+                current_obs[agent_id] = true_obs
+                human_overrides[agent_id] = human_data # Save the signals for Step B
                 
                 if agent_id not in active_episodes:
                     active_episodes[agent_id] = [] 
 
-            # B. EPSILON-GREEDY ACTION
+            # --- B. ACTION SELECTION (HUMAN vs AI) ---
             actions_to_send = []
             agent_ids_taking_action = []
 
             for agent_id in decision_steps.agent_id:
-                if random.random() < epsilon:
+                human_data = human_overrides[agent_id]
+                
+                # Did the human press a key on this specific agent's keyboard?
+                if human_data[0] == 1.0:
+                    # EXPLORE: Execute the Human's flawless commands!
+                    act = [int(human_data[1]), int(human_data[2]), int(human_data[3]), int(human_data[4])]
+                
+                # If the human is NOT touching the keyboard, run the normal AI math
+                elif random.random() < epsilon:
+                    # EXPLORE: Random Action
                     act = [random.randint(0,2), random.randint(0,2), random.randint(0,1), random.randint(0,2)]
                 else:
+                    # EXPLOIT: Neural Network Action
                     with torch.no_grad():
                         obs_tensor = torch.FloatTensor(current_obs[agent_id]).unsqueeze(0).unsqueeze(0).to(device)
                         q_vals, _ = q_network(obs_tensor)
@@ -164,38 +182,35 @@ def run_training(load_model_path, epsilon_start, learning_rate, batch_size, gamm
             # C. STEP ENVIRONMENT
             env.step()
 
-            # D. GATHER REWARDS
+            # --- D. GATHER REWARDS & SAVE ---
             new_decision_steps, new_terminal_steps = env.get_steps(behavior_name)
 
-            # 1. Agents still alive
             for idx, agent_id in enumerate(agent_ids_taking_action):
                 if agent_id in new_decision_steps.agent_id:
                     agent_idx = new_decision_steps.agent_id_to_index[agent_id]
-                    next_o = np.concatenate([obs[agent_idx] for obs in new_decision_steps.obs])
+                    
+                    # FIX 1: Slice the next observation here!
+                    next_o = np.concatenate([obs[agent_idx] for obs in new_decision_steps.obs])[:-5]
+                    
                     reward = new_decision_steps.reward[agent_idx]
-                    
-                    # --- NEW: Add reward to running total ---
                     agent_episode_rewards[agent_id] = agent_episode_rewards.get(agent_id, 0) + reward
-                    
                     active_episodes[agent_id].append((current_obs[agent_id], actions_to_send[idx], reward, next_o, False))
 
-            # 2. Agents that crashed or delivered
             for agent_id in new_terminal_steps.agent_id:
                 if agent_id in current_obs and agent_id in agent_ids_taking_action:
                     idx = agent_ids_taking_action.index(agent_id)
                     agent_idx = new_terminal_steps.agent_id_to_index[agent_id]
-                    next_o = np.concatenate([obs[agent_idx] for obs in new_terminal_steps.obs])
+                    
+                    # FIX 2: Slice the terminal observation here!
+                    next_o = np.concatenate([obs[agent_idx] for obs in new_terminal_steps.obs])[:-5]
+                    
                     reward = new_terminal_steps.reward[agent_idx]
                     
-                    # --- NEW: Finalize reward and log to TensorBoard! ---
                     final_score = agent_episode_rewards.get(agent_id, 0) + reward
                     cumulative_team_reward += final_score
                     episodes_completed += 1
 
-                    # Write individual agent score
                     writer.add_scalar(f"2_Agents/Agent_{agent_id}_Score", final_score, step)
-                    
-                    # Reset this specific agent's score for its next life
                     agent_episode_rewards[agent_id] = 0 
                     
                     active_episodes[agent_id].append((current_obs[agent_id], actions_to_send[idx], reward, next_o, True))
@@ -233,6 +248,11 @@ def run_training(load_model_path, epsilon_start, learning_rate, batch_size, gamm
                 
                 # --- NEW: Log the team's total cumulative performance ---
                 writer.add_scalar("3_Warehouse/Cumulative_Team_Reward", cumulative_team_reward, step)
+
+            # =========================================================
+            # 🚨 THE MISSING LINK: Pass the baton to the next frame! 🚨
+            # =========================================================
+            decision_steps = new_decision_steps
 
     except KeyboardInterrupt:
             print("\nTraining interrupted by user. Saving model...")
