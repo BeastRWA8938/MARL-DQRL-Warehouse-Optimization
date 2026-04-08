@@ -96,7 +96,7 @@ def run_training(load_model_path, epsilon_start, learning_rate, batch_size, gamm
     
     # Hardcoded structural parameters
     seq_length = 10
-    memory_capacity = 5000
+    memory_capacity = 10000
     epsilon_end = 0.05
     epsilon_decay = int(max_steps * 0.8) # Decay over 80% of the training time
 
