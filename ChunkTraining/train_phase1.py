@@ -96,9 +96,12 @@ def run_phase1(load_model_path, epsilon_start, learning_rate, batch_size, gamma,
 
     optimizer = optim.Adam(q_network.parameters(), lr=learning_rate)
     
-    seq_length = 10
-    memory = SequentialReplayBuffer(capacity=5000, sequence_length=seq_length)
+    seq_length = 20
+    burn_in = 10
+    memory = SequentialReplayBuffer(capacity=5000, sequence_length=seq_length, burn_in=burn_in)
     active_episodes = {} 
+    
+    hidden_states = {} 
     
     epsilon = epsilon_start
     epsilon_end = 0.05
@@ -144,7 +147,14 @@ def run_phase1(load_model_path, epsilon_start, learning_rate, batch_size, gamma,
                 else: # Exploit
                     with torch.no_grad():
                         obs_tensor = torch.FloatTensor(current_obs[agent_id]).unsqueeze(0).unsqueeze(0).to(device)
-                        q_vals, _ = q_network(obs_tensor)
+                        if agent_id not in hidden_states:
+                            hidden_states[agent_id] = q_network.init_hidden(1, device)
+
+                        q_vals, hidden_states[agent_id] = q_network(obs_tensor, hidden_states[agent_id])
+
+                        # Detach hidden state to prevent backprop explosion
+                        h, c = hidden_states[agent_id]
+                        hidden_states[agent_id] = (h.detach(), c.detach())
                         act = [torch.argmax(q[0]).item() for q in q_vals]
 
                 actions_to_send.append(act)
@@ -178,15 +188,24 @@ def run_phase1(load_model_path, epsilon_start, learning_rate, batch_size, gamma,
                     active_episodes[agent_id].append((current_obs[agent_id], actions_to_send[idx], reward, next_o, True))
                     memory.push_episode(active_episodes[agent_id])
                     active_episodes[agent_id] = []
+                    hidden_states[agent_id] = q_network.init_hidden(1, device)
 
             # --- E. TRAIN ---
             epsilon = max(epsilon_end, epsilon_start - step * ((epsilon_start - epsilon_end) / epsilon_decay))
 
             if len(memory) > batch_size:
-                b_obs, b_actions, b_rewards, b_next_obs, b_dones = memory.sample(batch_size)
-                current_q_vals, _ = q_network(b_obs)
+                b_obs, b_actions, b_rewards, b_next_obs, b_dones, b_burn = memory.sample(batch_size)
+                # Initialize hidden state for batch
+                hidden = q_network.init_hidden(batch_size, device)
+
+                # Burn-in phase (no gradients)
                 with torch.no_grad():
-                    next_q_vals, _ = q_network(b_next_obs)
+                    _, hidden = q_network(b_burn, hidden)
+
+                # Training phase
+                current_q_vals, _ = q_network(b_obs, hidden)
+                with torch.no_grad():
+                    next_q_vals, _ = q_network(b_next_obs, hidden)
 
                 total_loss = 0
                 for branch_idx in range(4):
@@ -198,6 +217,7 @@ def run_phase1(load_model_path, epsilon_start, learning_rate, batch_size, gamma,
 
                 optimizer.zero_grad()
                 total_loss.backward()
+                torch.nn.utils.clip_grad_norm_(q_network.parameters(), 5.0)
                 optimizer.step()
 
             if step % 500 == 0 and step > 0:

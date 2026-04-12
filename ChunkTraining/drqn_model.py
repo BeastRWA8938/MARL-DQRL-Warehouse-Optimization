@@ -16,6 +16,7 @@ class DRQN(nn.Module):
         self.fc1 = nn.Linear(input_size, hidden_size)
         self.fc2 = nn.Linear(hidden_size, hidden_size)
 
+        # LSTM processes sequences: input shape = [batch, seq_len, hidden_size]
         self.lstm = nn.LSTM(input_size=hidden_size, hidden_size=hidden_size, batch_first=True)
 
         self.head_move = nn.Linear(hidden_size, 3)
@@ -24,6 +25,7 @@ class DRQN(nn.Module):
         self.head_forks = nn.Linear(hidden_size, 3)
 
     def forward(self, x, hidden_state=None):
+        # x expected shape: [batch, seq_len, input_size]
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
         

@@ -3,13 +3,14 @@ import numpy as np
 import torch
 
 class SequentialReplayBuffer:
-    def __init__(self, capacity=10000, sequence_length=5):
+    def __init__(self, capacity=10000, sequence_length=20, burn_in=10):
         """
         capacity: How many full episodes the memory can hold before forgetting old ones.
         sequence_length: How many frames the LSTM looks at in one "movie clip" (e.g., 5 frames).
         """
         self.capacity = capacity
         self.sequence_length = sequence_length
+        self.burn_in = burn_in
         self.buffer = [] # This will store lists of complete episodes
         self.position = 0
 
@@ -41,12 +42,19 @@ class SequentialReplayBuffer:
             # 2. Pick a random starting frame within the episode
             # We subtract sequence_length to ensure we don't accidentally grab a movie that runs off the end
             start_idx = random.randint(0, len(ep) - self.sequence_length)
-            
-            # 3. Slice out a chunk of frames (e.g., frame 10 to frame 15)
-            sequence = ep[start_idx : start_idx + self.sequence_length]
-            
-            # 4. Unzip the data so we have a list of all obs, all actions, etc.
-            obs, actions, rewards, next_obs, dones = zip(*sequence)
+            end_idx = start_idx + self.sequence_length
+
+            sequence = ep[start_idx:end_idx]
+
+            # Split into burn-in and training parts
+            burn_in_seq = sequence[:self.burn_in]
+            train_seq = sequence[self.burn_in:]
+
+            # Burn-in part
+            b_obs, _, _, _, _ = zip(*burn_in_seq)
+
+            # Training part
+            obs, actions, rewards, next_obs, dones = zip(*train_seq)
             
             batch_obs.append(np.array(obs))
             batch_actions.append(np.array(actions))
@@ -62,7 +70,8 @@ class SequentialReplayBuffer:
             torch.LongTensor(np.array(batch_actions)).to(device),
             torch.FloatTensor(np.array(batch_rewards)).to(device),
             torch.FloatTensor(np.array(batch_next_obs)).to(device),
-            torch.FloatTensor(np.array(batch_dones)).to(device)
+            torch.FloatTensor(np.array(batch_dones)).to(device),
+            torch.FloatTensor(np.array([b_obs])).to(device)  # burn-in observations
         )
 
     def __len__(self):
