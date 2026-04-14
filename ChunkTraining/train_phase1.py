@@ -87,6 +87,11 @@ def run_phase1(load_model_path, epsilon_start, learning_rate, batch_size, gamma,
 
     q_network = DRQN(input_size=total_obs_size).to(device)
     
+    # 🔥 TARGET NETWORK (stabilizes learning)
+    target_network = DRQN(input_size=total_obs_size).to(device)
+    target_network.load_state_dict(q_network.state_dict())
+    target_network.eval()  # no gradients
+    
     # --- NEW: LOAD THE MODEL IF REQUESTED ---
     if load_model_path and os.path.exists(load_model_path):
         q_network.load_state_dict(torch.load(load_model_path))
@@ -105,7 +110,7 @@ def run_phase1(load_model_path, epsilon_start, learning_rate, batch_size, gamma,
     
     epsilon = epsilon_start
     epsilon_end = 0.05
-    epsilon_decay = int(max_steps * 0.8)
+    epsilon_decay = int(max_steps * 0.4)
     
     total_loss = torch.tensor(0.0) 
 
@@ -140,8 +145,12 @@ def run_phase1(load_model_path, epsilon_start, learning_rate, batch_size, gamma,
             for agent_id in decision_steps.agent_id:
                 human_data = human_overrides[agent_id]
                 
-                if human_data[0] == 1.0: # Human Override
-                    act = [int(human_data[1]), int(human_data[2]), int(human_data[3]), int(human_data[4])]
+                if human_data[0] == 1.0:
+                    # 🔥 Send NO-OP action so Unity takes over cleanly
+                    act = [0, 0, 0, 0]
+                    actions_to_send.append(act)
+                    agent_ids_taking_action.append(agent_id)
+                    continue
                 elif random.random() < epsilon: # Explore
                     act = [random.randint(0,2), random.randint(0,2), random.randint(0,1), random.randint(0,2)]
                 else: # Exploit
@@ -157,8 +166,9 @@ def run_phase1(load_model_path, epsilon_start, learning_rate, batch_size, gamma,
                         hidden_states[agent_id] = (h.detach(), c.detach())
                         act = [torch.argmax(q[0]).item() for q in q_vals]
 
-                actions_to_send.append(act)
-                agent_ids_taking_action.append(agent_id)
+                if human_data[0] != 1.0:
+                    actions_to_send.append(act)
+                    agent_ids_taking_action.append(agent_id)
 
             if len(actions_to_send) > 0:
                 action_tuple = ActionTuple(discrete=np.array(actions_to_send, dtype=np.int32))
@@ -205,7 +215,7 @@ def run_phase1(load_model_path, epsilon_start, learning_rate, batch_size, gamma,
                 # Training phase
                 current_q_vals, _ = q_network(b_obs, hidden)
                 with torch.no_grad():
-                    next_q_vals, _ = q_network(b_next_obs, hidden)
+                    next_q_vals, _ = target_network(b_next_obs, hidden)
 
                 total_loss = 0
                 for branch_idx in range(4):
@@ -213,6 +223,7 @@ def run_phase1(load_model_path, epsilon_start, learning_rate, batch_size, gamma,
                     current_q = current_q_vals[branch_idx].gather(2, branch_actions).squeeze(-1)
                     max_next_q = next_q_vals[branch_idx].max(dim=2)[0]
                     target_q = b_rewards + gamma * max_next_q * (1 - b_dones)
+                    target_q = torch.clamp(target_q, -20, 20)
                     total_loss += F.mse_loss(current_q, target_q)
 
                 optimizer.zero_grad()
@@ -224,6 +235,10 @@ def run_phase1(load_model_path, epsilon_start, learning_rate, batch_size, gamma,
                 print(f"Step: {step} | Mem: {len(memory)} | Eps: {epsilon:.2f} | Loss: {total_loss.item():.4f}")
                 writer.add_scalar("Training/Loss", total_loss.item(), step)
                 writer.add_scalar("Training/Epsilon", epsilon, step)
+
+            # 🔥 Update target network every 1000 steps
+            if step % 1000 == 0:
+                target_network.load_state_dict(q_network.state_dict())
 
             # THE MISSING LINK: Pass baton to next frame
             decision_steps = new_decision_steps
@@ -238,6 +253,16 @@ def run_phase1(load_model_path, epsilon_start, learning_rate, batch_size, gamma,
             torch.save(q_network.state_dict(), full_save_path)
             print(f"💾 Model successfully saved at: {full_save_path}")
     finally:
+        print("\nTraining finished. Saving model...")
+
+        timestamp = datetime.now().strftime("%m-%d_%H-%M")
+        param_string = f"lr{learning_rate}_b{batch_size}_g{gamma}"
+        save_filename = f"{VERSION_NAME}_{param_string}_{timestamp}.pth"
+        full_save_path = os.path.join(SAVE_DIR, save_filename)
+
+        torch.save(q_network.state_dict(), full_save_path)
+        print(f"💾 Model saved at: {full_save_path}")
+
         writer.close()
         env.close()
 

@@ -37,6 +37,7 @@ class SequentialReplayBuffer:
         episodes = random.sample(self.buffer, batch_size)
         
         batch_obs, batch_actions, batch_rewards, batch_next_obs, batch_dones = [], [], [], [], []
+        batch_burn_obs = []
         
         for ep in episodes:
             # 2. Pick a random starting frame within the episode
@@ -44,18 +45,19 @@ class SequentialReplayBuffer:
             start_idx = random.randint(0, len(ep) - self.sequence_length)
             end_idx = start_idx + self.sequence_length
 
-            sequence = ep[start_idx:end_idx]
+            sequence = ep[start_idx : start_idx + self.sequence_length]
 
             # Split into burn-in and training parts
             burn_in_seq = sequence[:self.burn_in]
             train_seq = sequence[self.burn_in:]
 
-            # Burn-in part
-            b_obs, _, _, _, _ = zip(*burn_in_seq)
+            # --- Burn-in ---
+            burn_obs, _, _, _, _ = zip(*burn_in_seq)
+            batch_burn_obs.append(np.array(burn_obs))
 
-            # Training part
+            # --- Training ---
             obs, actions, rewards, next_obs, dones = zip(*train_seq)
-            
+
             batch_obs.append(np.array(obs))
             batch_actions.append(np.array(actions))
             batch_rewards.append(np.array(rewards))
@@ -71,7 +73,7 @@ class SequentialReplayBuffer:
             torch.FloatTensor(np.array(batch_rewards)).to(device),
             torch.FloatTensor(np.array(batch_next_obs)).to(device),
             torch.FloatTensor(np.array(batch_dones)).to(device),
-            torch.FloatTensor(np.array([b_obs])).to(device)  # burn-in observations
+            torch.FloatTensor(np.array(batch_burn_obs)).to(device)  # burn-in observations
         )
 
     def __len__(self):
