@@ -101,8 +101,8 @@ def run_phase1(load_model_path, epsilon_start, learning_rate, batch_size, gamma,
 
     optimizer = optim.Adam(q_network.parameters(), lr=learning_rate)
     
-    seq_length = 20
-    burn_in = 10
+    seq_length = 2
+    burn_in = 0
     memory = SequentialReplayBuffer(capacity=5000, sequence_length=seq_length, burn_in=burn_in)
     active_episodes = {} 
     
@@ -147,7 +147,13 @@ def run_phase1(load_model_path, epsilon_start, learning_rate, batch_size, gamma,
                 
                 if human_data[0] == 1.0:
                     # 🔥 Send NO-OP action so Unity takes over cleanly
-                    act = [0, 0, 0, 0]
+                    if human_data[0] == 1.0:
+                        act = [
+                            int(human_data[1]),  # move
+                            int(human_data[2]),  # turn
+                            int(human_data[3]),  # interact
+                            0
+                        ]
                     actions_to_send.append(act)
                     agent_ids_taking_action.append(agent_id)
                     continue
@@ -208,9 +214,13 @@ def run_phase1(load_model_path, epsilon_start, learning_rate, batch_size, gamma,
                 # Initialize hidden state for batch
                 hidden = q_network.init_hidden(batch_size, device)
 
+# Initialize hidden state for batch
+                hidden = q_network.init_hidden(batch_size, device)
+
                 # Burn-in phase (no gradients)
-                with torch.no_grad():
-                    _, hidden = q_network(b_burn, hidden)
+                if burn_in > 0:
+                    with torch.no_grad():
+                        _, hidden = q_network(b_burn, hidden)
 
                 # Training phase
                 current_q_vals, _ = q_network(b_obs, hidden)

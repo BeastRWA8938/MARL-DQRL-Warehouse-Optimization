@@ -51,9 +51,10 @@ class SequentialReplayBuffer:
             burn_in_seq = sequence[:self.burn_in]
             train_seq = sequence[self.burn_in:]
 
-            # --- Burn-in ---
-            burn_obs, _, _, _, _ = zip(*burn_in_seq)
-            batch_burn_obs.append(np.array(burn_obs))
+# --- Burn-in ---
+            if self.burn_in > 0:
+                burn_obs, _, _, _, _ = zip(*burn_in_seq)
+                batch_burn_obs.append(np.array(burn_obs))
 
             # --- Training ---
             obs, actions, rewards, next_obs, dones = zip(*train_seq)
@@ -64,16 +65,21 @@ class SequentialReplayBuffer:
             batch_next_obs.append(np.array(next_obs))
             batch_dones.append(np.array(dones))
             
-        # 5. Convert everything to PyTorch Tensors and send them directly to the GPU
+# 5. Convert everything to PyTorch Tensors and send them directly to the GPU
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
+        if self.burn_in > 0:
+            burn_tensor = torch.FloatTensor(np.array(batch_burn_obs)).to(device)
+        else:
+            burn_tensor = torch.empty(0).to(device) # Safe dummy tensor
+
         return (
             torch.FloatTensor(np.array(batch_obs)).to(device),
             torch.LongTensor(np.array(batch_actions)).to(device),
             torch.FloatTensor(np.array(batch_rewards)).to(device),
             torch.FloatTensor(np.array(batch_next_obs)).to(device),
             torch.FloatTensor(np.array(batch_dones)).to(device),
-            torch.FloatTensor(np.array(batch_burn_obs)).to(device)  # burn-in observations
+            burn_tensor 
         )
 
     def __len__(self):
