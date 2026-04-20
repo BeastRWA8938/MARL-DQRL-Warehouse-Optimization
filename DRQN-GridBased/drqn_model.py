@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class DRQN(nn.Module):
-    def __init__(self, input_size=11, hidden_size=128, output_size=5):
+    def __init__(self, input_size=13, hidden_size=128, output_size=5): # ⚠️ Changed 11 to 13
         super(DRQN, self).__init__()
         self.hidden_size = hidden_size
 

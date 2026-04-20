@@ -37,8 +37,9 @@ class SequentialReplayBuffer:
             sequence = episode[start_idx : start_idx + self.sequence_length]
             
             # Pad the sequence with zeros if the episode was shorter than 8 steps
+            # Inside sample_batch, change np.zeros(11) to np.zeros(13)
             while len(sequence) < self.sequence_length:
-                sequence.append((np.zeros(11), 4, 0.0, np.zeros(11), True)) # 4 is Wait action
+                sequence.append((np.zeros(13), 3, 0.0, np.zeros(13), True)) # Action 3 is now Wait
                 
             # Unpack the sequence
             s, a, r, s_prime, d = zip(*sequence)
