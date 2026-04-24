@@ -22,15 +22,30 @@ def save_checkpoint(model, target_model, optimizer, epsilon, episode, filename="
     }
     torch.save(checkpoint, filepath)
 
+def load_checkpoint(model, target_model, optimizer, filename="marl_checkpoint.pth"):
+    filepath = os.path.join("saved_models", filename)
+    if os.path.isfile(filepath):
+        checkpoint = torch.load(filepath)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        target_model.load_state_dict(checkpoint['target_model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        epsilon = checkpoint['epsilon']
+        start_episode = checkpoint['episode']
+        print(f"🔄 [LOAD STATE] Neural link restored! Resuming from Episode {start_episode}...")
+        return epsilon, start_episode
+    else:
+        print("⚠️ [WARNING] No prior save state found. Booting fresh brain.")
+        return EPSILON_START, 0
+
 from drqn_model import DRQN
 from replay_buffer import SequentialReplayBuffer
 
 # --- HYPERPARAMETERS ---
-MAX_EPISODES = 500000
+MAX_EPISODES = 10000
 BATCH_SIZE = 32
 GAMMA = 0.99           
 LR = 0.001             
-EPSILON_START = 1.0    
+EPSILON_START = 0.05    
 EPSILON_MIN = 0.05     
 TARGET_UPDATE_FREQ = 10 
 
@@ -56,6 +71,8 @@ loss_fn = nn.MSELoss()
 buffer = SequentialReplayBuffer(capacity=5000, sequence_length=8)
 
 # ⚠️ FORCING A FRESH START
+epsilon, start_episode = load_checkpoint(model, target_model, optimizer, filename=r"FINAL_DDQN_B32_G0.99_LR0.001_E1.0-0.05_2026-04-24_17-54_FINAL.pth")
+
 epsilon = EPSILON_START
 start_episode = 0
 
