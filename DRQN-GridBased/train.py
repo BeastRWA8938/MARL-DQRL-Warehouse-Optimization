@@ -9,7 +9,6 @@ import os
 import copy 
 from datetime import datetime
 
-# Create a secure vault for your brain files
 os.makedirs("saved_models", exist_ok=True)
 
 def save_checkpoint(model, target_model, optimizer, epsilon, episode, filename="marl_checkpoint.pth"):
@@ -22,22 +21,6 @@ def save_checkpoint(model, target_model, optimizer, epsilon, episode, filename="
         'episode': episode
     }
     torch.save(checkpoint, filepath)
-    print(f"💾 [SAVE STATE] Checkpoint secured at Episode {episode}!")
-
-def load_checkpoint(model, target_model, optimizer, filename="marl_checkpoint.pth"):
-    filepath = os.path.join("saved_models", filename)
-    if os.path.isfile(filepath):
-        checkpoint = torch.load(filepath)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        target_model.load_state_dict(checkpoint['target_model_state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        epsilon = checkpoint['epsilon']
-        start_episode = checkpoint['episode']
-        print(f"🔄 [LOAD STATE] Neural link restored! Resuming from Episode {start_episode}...")
-        return epsilon, start_episode
-    else:
-        print("⚠️ [WARNING] No prior save state found. Booting fresh brain.")
-        return EPSILON_START, 0
 
 from drqn_model import DRQN
 from replay_buffer import SequentialReplayBuffer
@@ -52,10 +35,9 @@ EPSILON_MIN = 0.05
 TARGET_UPDATE_FREQ = 10 
 
 current_time = datetime.now().strftime("%Y-%m-%d_%H-%M")
-RUN_NAME = f"DDQN_DRQN_B{BATCH_SIZE}_G{GAMMA}_LR{LR}_E{EPSILON_START}-{EPSILON_MIN}_{current_time}"
+RUN_NAME = f"FINAL_DDQN_B{BATCH_SIZE}_G{GAMMA}_LR{LR}_E{EPSILON_START}-{EPSILON_MIN}_{current_time}"
 print(f"🏷️ Run Signature Generated: {RUN_NAME}")
 
-# --- INITIALIZATION ---
 print("Booting up Stabilized Single-Agent DDQN Engine...")
 env = UnityEnvironment(file_name=None, seed=42, side_channels=[])
 env.reset()
@@ -73,8 +55,7 @@ optimizer = optim.Adam(model.parameters(), lr=LR)
 loss_fn = nn.MSELoss()
 buffer = SequentialReplayBuffer(capacity=5000, sequence_length=8)
 
-# ⚠️ Important: We are ignoring the old checkpoints to start fresh with DDQN
-# epsilon, start_episode = load_checkpoint(model, target_model, optimizer)
+# ⚠️ FORCING A FRESH START
 epsilon = EPSILON_START
 start_episode = 0
 
@@ -97,25 +78,23 @@ for episode in range(start_episode, MAX_EPISODES):
     while not done:
         step_count += 1
         
-        # --- ACTION SELECTION ---
         if np.random.rand() < epsilon:
             action = np.random.randint(0, 5)
         else:
             state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device) 
             with torch.no_grad():
-                q_values, hidden_state = model(state_tensor, hidden_state)
+                q_values_seq, hidden_state = model(state_tensor, hidden_state)
             
-            # Sever the computational graph to prevent memory leaks
             hidden_state = (hidden_state[0].detach(), hidden_state[1].detach())
             
+            # Extract just the last frame to make the decision
+            q_values = q_values_seq[:, -1, :]
             action = torch.argmax(q_values, dim=1).item()
 
-        # --- EXECUTE ACTION ---
         action_tuple = ActionTuple(discrete=np.array([[action]]))
         env.set_actions(behavior_name, action_tuple)
         env.step() 
 
-        # --- OBSERVE RESULTS ---
         decision_steps, terminal_steps = env.get_steps(behavior_name)
         
         if len(terminal_steps) > 0:
@@ -134,7 +113,6 @@ for episode in range(start_episode, MAX_EPISODES):
         buffer.store_transition(state, action, reward, next_state, done)
         state = next_state
 
-    # --- EPSILON DECAY ---
     decay_cutoff = int(MAX_EPISODES * 0.8) 
     if episode < decay_cutoff:
         progress = episode / decay_cutoff
@@ -142,11 +120,9 @@ for episode in range(start_episode, MAX_EPISODES):
     else:
         epsilon = EPSILON_MIN
 
-    # --- PERIODIC TARGET NETWORK SYNC ---
     if episode % TARGET_UPDATE_FREQ == 0:
         target_model.load_state_dict(model.state_dict())
 
-    # --- NEURAL NETWORK BACKPROPAGATION ---
     current_loss = 0.0 
     if len(buffer.buffer) > BATCH_SIZE: 
         s_batch, a_batch, r_batch, s_prime_batch, d_batch = buffer.sample_batch(BATCH_SIZE)
@@ -157,39 +133,33 @@ for episode in range(start_episode, MAX_EPISODES):
         d_batch = d_batch.to(device)
 
         h1 = model.init_hidden(batch_size=BATCH_SIZE, device=device)
-        q_values, _ = model(s_batch, h1) 
+        q_values_seq, _ = model(s_batch, h1) 
         
-        last_actions = a_batch[:, -1].unsqueeze(1) 
-        current_q = q_values.gather(1, last_actions).squeeze(1) 
+        # 🚀 Sequence Unrolling: Gather Q-values for ALL 8 frames!
+        current_q = q_values_seq.gather(2, a_batch.unsqueeze(2)).squeeze(2) 
         
-        # 🚀 GEMINI FIX: Double DQN Evaluation
         with torch.no_grad():
-            # Main model SELECTS the best action
             h_main = model.init_hidden(batch_size=BATCH_SIZE, device=device)
             next_q_main, _ = model(s_prime_batch, h_main)
-            best_next_actions = next_q_main.argmax(dim=1).unsqueeze(1) 
+            best_next_actions = next_q_main.argmax(dim=2).unsqueeze(2) 
 
-            # Target model EVALUATES the action
             h_target = target_model.init_hidden(batch_size=BATCH_SIZE, device=device)
             next_q_target, _ = target_model(s_prime_batch, h_target) 
-            max_next_q = next_q_target.gather(1, best_next_actions).squeeze(1) 
+            max_next_q = next_q_target.gather(2, best_next_actions).squeeze(2) 
             
-            last_rewards = r_batch[:, -1]
-            last_dones = d_batch[:, -1].float()
+            last_dones = d_batch.float()
             
-            target_q = last_rewards + GAMMA * max_next_q * (1 - last_dones)
+            # 🚀 Apply Bellman over the whole sequence
+            target_q = r_batch + GAMMA * max_next_q * (1 - last_dones)
 
         loss = loss_fn(current_q, target_q) 
         
         optimizer.zero_grad()
         loss.backward()
-        
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        
         optimizer.step()
         current_loss = loss.item() 
 
-    # --- TENSORBOARD LOGGING ---
     writer.add_scalar('Reward/Total_Reward', episode_reward, episode)
     writer.add_scalar('Metrics/Episode_Length', step_count, episode)
     writer.add_scalar('Hyperparameters/Epsilon', epsilon, episode)
