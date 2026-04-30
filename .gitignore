@@ -1,1 +1,17 @@
 venv/
+
+# Ignore Unity build artifacts in the Remake/Build folder by default
+# Only keep the necessary runtime files and the game data folder.
+Remake/Build/*
+!Remake/Build/Warehouse.exe
+!Remake/Build/Warehouse_Data/
+!Remake/Build/Warehouse_Data/**
+!Remake/Build/UnityPlayer.dll
+!Remake/Build/UnityCrashHandler64.exe
+!Remake/Build/DirectML.dll
+!Remake/Build/D3D12/
+!Remake/Build/D3D12/**
+
+# Ignore optional / unnecessary generated build support files
+Remake/Build/Warehouse_BurstDebugInformation_DoNotShip/
+Remake/Build/MonoBleedingEdge/
