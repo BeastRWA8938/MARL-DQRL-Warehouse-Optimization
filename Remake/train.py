@@ -20,19 +20,19 @@ if __name__ == '__main__':
     # 1. RUN MODE SETTINGS
     # ==========================================
     # Modes: "train" (start fresh), "resume" (continue training), "test" (watch inference)
-    MODE = "resume" 
+    MODE = "train" 
     
     # Path to the .pth file you want to load for resuming or testing
-    LOAD_MODEL_PATH = "checkpoints/drqn_ep80000_gamma0.99_eps0.41_mem155794.pth" 
+    LOAD_MODEL_PATH = "checkpoints/drqn_ep60000_gamma0.99_eps0.51_mem133081.pth" 
 
     # ==========================================
     # 2. HYPERPARAMETERS
     # ==========================================
     GAMMA = 0.99
-    LR = 1e-5
+    LR = 1e-4
     BATCH_SIZE = 32
     SEQ_LEN = 10
-    TOTAL_EPISODES = 300000
+    TOTAL_EPISODES = 10000
     TARGET_UPDATE_FREQ = 10 
 
     # --- Dynamic Epsilon Settings ---
@@ -94,28 +94,30 @@ if __name__ == '__main__':
     # ==========================================
     print("Waiting for Unity Environment... Please press PLAY in the Unity Editor or wait for file to load.")
     # !!!!!!!!!!!!!!! IMPORTANT !!!!!!!!!!!!!!!
-    # env = UnityEnvironment(file_name=None, seed=42) # if you do not have environment compiled
+    if MODE == "test":
+        env = UnityEnvironment(file_name=None, seed=42) # if you do not have environment compiled
     # if you have your environment built then do the below
     # env_path
+    else:
     #env_path = "Build/Warehouse.exe"
     #env = UnityEnvironment(file_name=env_path, seed=42, no_graphics=True, additional_args=["-timeScale","100"])
 
     # Setup the side channel to talk directly to Unity's engine
-    engine_channel = EngineConfigurationChannel()
+        engine_channel = EngineConfigurationChannel()
 
-    print("Launching Headless Unity Environment...")
-    env_path = "Build/Warehouse.exe" # Ensure this matches your actual path
+        print("Launching Headless Unity Environment...")
+        env_path = "Build/Warehouse.exe" # Ensure this matches your actual path
 
-    # Pass the channel into the environment
-    env = UnityEnvironment(
-        file_name=env_path, 
-        seed=42, 
-        side_channels=[engine_channel], 
-        no_graphics=True
-    )
+        # Pass the channel into the environment
+        env = UnityEnvironment(
+            file_name=env_path, 
+            seed=42, 
+            side_channels=[engine_channel], 
+            no_graphics=True
+        )
 
-    # FORCE Unity to run at 100x speed and uncap the framerate (-1 means no limit)
-    engine_channel.set_configuration_parameters(time_scale=100.0, target_frame_rate=-1)
+        # FORCE Unity to run at 100x speed and uncap the framerate (-1 means no limit)
+        engine_channel.set_configuration_parameters(time_scale=100.0, target_frame_rate=-1)
     # handle the above env first before running
     # !!!!!!!!!!!!!!! END IMPORTANT !!!!!!!!!!!!
     env.reset()
@@ -146,7 +148,7 @@ if __name__ == '__main__':
                 if random.random() < current_epsilon:
                     action_int = random.randint(0, 2)
                 else:
-                    action_int = torch.argmax(q_values).item()
+                    action_int = torch.argmax(q_values[0, -1]).item()
                 
                 hidden_state = new_hidden_state
 
@@ -175,12 +177,14 @@ if __name__ == '__main__':
                     if batch:
                         b_states, b_actions, b_rewards, b_next_states, b_dones = [b.to(device) for b in batch]
                         
-                        curr_q, _ = policy_net(b_states)
+                        curr_q_seq, _ = policy_net(b_states)
+                        curr_q = curr_q_seq[:, -1, :]
                         last_actions = b_actions[:, -1].unsqueeze(-1)
                         curr_q_taken = curr_q.gather(1, last_actions).squeeze(-1)
                         
                         with torch.no_grad():
-                            next_q, _ = target_net(b_next_states)
+                            next_q_seq, _ = target_net(b_next_states)
+                            next_q = next_q_seq[:, -1, :]
                             max_next_q = next_q.max(1)[0]
                             
                         last_rewards = b_rewards[:, -1]
