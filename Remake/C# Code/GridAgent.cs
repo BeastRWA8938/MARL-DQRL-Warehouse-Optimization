@@ -21,6 +21,10 @@ public class GridAgent : Agent
     public Vector2Int currentGridPos;
     public int facingDirection; // 0=N, 1=E, 2=S, 3=W
 
+    [Header("Reward Tuning")]
+    public float rackPenalty = 1.0f;
+    public float emptyDropzonePenalty = 2.0f;
+
     [Header("Visuals")]
     public float lineOffsetHeight = 0.5f;
     private LineRenderer targetLine;
@@ -161,7 +165,10 @@ public class GridAgent : Agent
                 // --- PHASE 1 ---
                 if (currentPhase == AgentPhase.SeekCargo)
                 {
-                    // Delivery zone collision is intentionally ignored in Phase 1 (treated as empty floor)
+                    if (currentGridPos == gridManager.deliveryLocation)
+                    {
+                        stepReward -= emptyDropzonePenalty;
+                    }
 
                     if (currentGridPos == gridManager.currentCargoLocation)
                     {
@@ -172,6 +179,10 @@ public class GridAgent : Agent
                         shouldCalculatePBRS = false; // Block PBRS spike during target shift
                         
                         HandleVisualPickup(); 
+                    }
+                    else if (IsRackLocation(currentGridPos))
+                    {
+                        stepReward -= rackPenalty;
                     }
                 }
                 // --- PHASE 2 ---
@@ -184,6 +195,10 @@ public class GridAgent : Agent
                         episodeEnded = true;
                         
                         HandleVisualDrop(); 
+                    }
+                    else if (IsRackLocation(currentGridPos))
+                    {
+                        stepReward -= rackPenalty;
                     }
                 }
             }
@@ -247,6 +262,11 @@ public class GridAgent : Agent
             case 3: return new Vector2Int(-v.y, v.x);       
             default: return v;
         }
+    }
+
+    private bool IsRackLocation(Vector2Int gridPos)
+    {
+        return gridManager.cargoSpawnLocations.Contains(gridPos);
     }
 
     private void UpdatePhysicalPosition() 

@@ -20,10 +20,10 @@ if __name__ == '__main__':
     # 1. RUN MODE SETTINGS
     # ==========================================
     # Modes: "train" (start fresh), "resume" (continue training), "test" (watch inference)
-    MODE = "train" 
+    MODE = "test" 
     
     # Path to the .pth file you want to load for resuming or testing
-    LOAD_MODEL_PATH = "checkpoints/drqn_ep60000_gamma0.99_eps0.51_mem133081.pth" 
+    LOAD_MODEL_PATH = "checkpoints/drqn_ep10000_gamma0.99_eps0.05_mem55179.pth" 
 
     # ==========================================
     # 2. HYPERPARAMETERS
@@ -221,7 +221,7 @@ if __name__ == '__main__':
                     target_net.load_state_dict(policy_net.state_dict())
 
                 # Dynamic Checkpointing
-                if episode % 10000 == 0:
+                if episode % (TOTAL_EPISODES/10) == 0:
                     model_name = f"drqn_ep{episode}_gamma{GAMMA}_eps{current_epsilon:.2f}_mem{buffer.total_frames_stored}.pth"
                     save_path = os.path.join("checkpoints", model_name)
                     torch.save({
