@@ -10,6 +10,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from mlagents_envs.environment import UnityEnvironment
 from mlagents_envs.base_env import ActionTuple
+from mlagents_envs.side_channel.engine_configuration_channel import EngineConfigurationChannel
 
 from drqn_model import DRQN
 from replay_buffer import EpisodicReplayBuffer
@@ -19,10 +20,10 @@ if __name__ == '__main__':
     # 1. RUN MODE SETTINGS
     # ==========================================
     # Modes: "train" (start fresh), "resume" (continue training), "test" (watch inference)
-    MODE = "train" 
+    MODE = "resume" 
     
     # Path to the .pth file you want to load for resuming or testing
-    LOAD_MODEL_PATH = "checkpoints/drqn_ep10000_gamma0.99_eps0.05_mem40000.pth" 
+    LOAD_MODEL_PATH = "checkpoints/drqn_ep80000_gamma0.99_eps0.41_mem155794.pth" 
 
     # ==========================================
     # 2. HYPERPARAMETERS
@@ -96,9 +97,26 @@ if __name__ == '__main__':
     # env = UnityEnvironment(file_name=None, seed=42) # if you do not have environment compiled
     # if you have your environment built then do the below
     # env_path
-    env_path = "Build/Warehouse.exe"
-    env = UnityEnvironment(file_name=env_path, seed=42, no_graphics=True)
-    # handle the above env first before running.
+    #env_path = "Build/Warehouse.exe"
+    #env = UnityEnvironment(file_name=env_path, seed=42, no_graphics=True, additional_args=["-timeScale","100"])
+
+    # Setup the side channel to talk directly to Unity's engine
+    engine_channel = EngineConfigurationChannel()
+
+    print("Launching Headless Unity Environment...")
+    env_path = "Build/Warehouse.exe" # Ensure this matches your actual path
+
+    # Pass the channel into the environment
+    env = UnityEnvironment(
+        file_name=env_path, 
+        seed=42, 
+        side_channels=[engine_channel], 
+        no_graphics=True
+    )
+
+    # FORCE Unity to run at 100x speed and uncap the framerate (-1 means no limit)
+    engine_channel.set_configuration_parameters(time_scale=100.0, target_frame_rate=-1)
+    # handle the above env first before running
     # !!!!!!!!!!!!!!! END IMPORTANT !!!!!!!!!!!!
     env.reset()
     behavior_name = list(env.behavior_specs.keys())[0]
