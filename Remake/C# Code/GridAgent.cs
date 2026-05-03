@@ -8,6 +8,8 @@ public class GridAgent : Agent
 {
     private const float Gamma = 0.99f;
     private const float ShapingScale = 0.2f;
+    private const float MinRackPenalty = 5.0f;
+    private const float MinEmptyDropzonePenalty = 12.0f;
 
     public enum AgentPhase { SeekCargo, DeliverCargo }
     public AgentPhase currentPhase = AgentPhase.SeekCargo;
@@ -22,8 +24,8 @@ public class GridAgent : Agent
     public int facingDirection; // 0=N, 1=E, 2=S, 3=W
 
     [Header("Reward Tuning")]
-    public float rackPenalty = 1.0f;
-    public float emptyDropzonePenalty = 2.0f;
+    public float rackPenalty = MinRackPenalty;
+    public float emptyDropzonePenalty = MinEmptyDropzonePenalty;
 
     [Header("Visuals")]
     public float lineOffsetHeight = 0.5f;
@@ -31,6 +33,8 @@ public class GridAgent : Agent
 
     public override void Initialize()
     {
+        EnforceMinimumPenalties();
+
         targetLine = GetComponent<LineRenderer>();
         if (targetLine != null)
         {
@@ -262,6 +266,17 @@ public class GridAgent : Agent
             case 3: return new Vector2Int(-v.y, v.x);       
             default: return v;
         }
+    }
+
+    private void OnValidate()
+    {
+        EnforceMinimumPenalties();
+    }
+
+    private void EnforceMinimumPenalties()
+    {
+        rackPenalty = Mathf.Max(rackPenalty, MinRackPenalty);
+        emptyDropzonePenalty = Mathf.Max(emptyDropzonePenalty, MinEmptyDropzonePenalty);
     }
 
     private bool IsRackLocation(Vector2Int gridPos)
