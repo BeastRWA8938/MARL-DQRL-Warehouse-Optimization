@@ -144,7 +144,7 @@ public class GridAgent : Agent
         {
             RotateAgent(action == 1 ? 1 : -1);
             stepReward -= 0.05f; // Base step penalty
-            shouldCalculatePBRS = true; 
+            shouldCalculatePBRS = false; 
         }
         else if (action == 0) 
         {

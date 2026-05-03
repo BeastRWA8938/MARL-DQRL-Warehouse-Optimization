@@ -4,16 +4,17 @@ using System.Collections.Generic;
 public class WarehouseGridManager : MonoBehaviour
 {
     [Header("Grid Dimensions")]
-    public int rows = 5;
-    public int cols = 10;
+    public int rows = 10; // Updated for the new Z depth
+    public int cols = 20; // Updated for the new X width
     public float surfaceLevelY = 0f;
 
     [Header("Fixed Zones")]
+    // Make sure to update this in the Inspector if your blue delivery zone moved!
     public Vector2Int deliveryLocation = new Vector2Int(1, 1); 
 
     [Header("Cargo Management")]
     public List<Vector2Int> cargoSpawnLocations = new List<Vector2Int>();
-    public GameObject cargoPrefab; // Drag your sphere/cargo prefab here
+    public GameObject cargoPrefab; 
     
     [HideInInspector] public Vector2Int currentCargoLocation;
     private GameObject activeCargoInstance;
@@ -25,7 +26,10 @@ public class WarehouseGridManager : MonoBehaviour
 
     public Vector3 GridToWorld(Vector2Int gridPos)
     {
-        return new Vector3(gridPos.x - 4.5f, surfaceLevelY+0.5f, gridPos.y + 0.5f);
+        // NEW MATH BASED ON YOUR VERTICES:
+        // Center of Bottom-Left (0,0) is at (-4.5, -4.5)
+        // Center of Top-Right (19,9) is at (14.5, 4.5)
+        return new Vector3(gridPos.x - 4.5f, surfaceLevelY + 0.5f, gridPos.y - 4.5f);
     }
 
     // Spawns (or moves) the physical cargo to a new random rack
@@ -47,8 +51,7 @@ public class WarehouseGridManager : MonoBehaviour
         }
     }
 
-    // Called by the agent when it successfully steps on the cargo
-// Called by the agent. Returns the physical cargo so the agent can carry it.
+    // Called by the agent. Returns the physical cargo so the agent can carry it.
     public GameObject GrabActiveCargo()
     {
         GameObject pickedUpCargo = activeCargoInstance;

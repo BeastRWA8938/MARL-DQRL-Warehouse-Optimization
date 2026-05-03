@@ -23,7 +23,7 @@ if __name__ == '__main__':
     MODE = "test" 
     
     # Path to the .pth file you want to load for resuming or testing
-    LOAD_MODEL_PATH = "checkpoints/drqn_ep10000_gamma0.99_eps0.05_mem49525.pth" 
+    LOAD_MODEL_PATH = "checkpoints/drqn_ep10000_gamma0.99_eps0.05_mem94414.pth" 
 
     # ==========================================
     # 2. HYPERPARAMETERS
