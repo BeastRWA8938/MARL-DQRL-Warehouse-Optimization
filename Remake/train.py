@@ -20,10 +20,10 @@ if __name__ == '__main__':
     # 1. RUN MODE SETTINGS
     # ==========================================
     # Modes: "train" (start fresh), "resume" (continue training), "test" (watch inference)
-    MODE = "test" 
+    MODE = "train" 
     
     # Path to the .pth file you want to load for resuming or testing
-    LOAD_MODEL_PATH = "checkpoints/drqn_ep10000_gamma0.99_eps0.05_mem94414.pth" 
+    LOAD_MODEL_PATH = "checkpoints/drqn_ep12000_gamma0.99_eps0.26_mem121537.pth" 
 
     # ==========================================
     # 2. HYPERPARAMETERS
@@ -32,7 +32,8 @@ if __name__ == '__main__':
     LR = 1e-4
     BATCH_SIZE = 32
     SEQ_LEN = 10
-    TOTAL_EPISODES = 10000
+    TOTAL_EPISODES = 30000
+    ROLLOUT_STEPS = 250
     TARGET_UPDATE_FREQ = 10 
 
     # --- Dynamic Epsilon Settings ---
@@ -93,16 +94,11 @@ if __name__ == '__main__':
     # 4. EXECUTION LOOP
     # ==========================================
     print("Waiting for Unity Environment... Please press PLAY in the Unity Editor or wait for file to load.")
+    # env = UnityEnvironment(file_name=None, seed=42) # if you do not have environment compiled
     # !!!!!!!!!!!!!!! IMPORTANT !!!!!!!!!!!!!!!
     if MODE == "test":
         env = UnityEnvironment(file_name=None, seed=42) # if you do not have environment compiled
-    # if you have your environment built then do the below
-    # env_path
     else:
-    #env_path = "Build/Warehouse.exe"
-    #env = UnityEnvironment(file_name=env_path, seed=42, no_graphics=True, additional_args=["-timeScale","100"])
-
-    # Setup the side channel to talk directly to Unity's engine
         engine_channel = EngineConfigurationChannel()
 
         print("Launching Headless Unity Environment...")
@@ -118,110 +114,170 @@ if __name__ == '__main__':
 
         # FORCE Unity to run at 100x speed and uncap the framerate (-1 means no limit)
         engine_channel.set_configuration_parameters(time_scale=100.0, target_frame_rate=-1)
-    # handle the above env first before running
+
     # !!!!!!!!!!!!!!! END IMPORTANT !!!!!!!!!!!!
     env.reset()
     behavior_name = list(env.behavior_specs.keys())[0]
 
+    def optimize_model():
+        batch = buffer.sample(BATCH_SIZE, SEQ_LEN)
+        if not batch:
+            return None
+
+        b_states, b_actions, b_rewards, b_next_states, b_dones = [b.to(device) for b in batch]
+
+        curr_q_seq, _ = policy_net(b_states)
+        curr_q = curr_q_seq[:, -1, :]
+        last_actions = b_actions[:, -1].unsqueeze(-1)
+        curr_q_taken = curr_q.gather(1, last_actions).squeeze(-1)
+
+        with torch.no_grad():
+            next_q_seq, _ = target_net(b_next_states)
+            next_q = next_q_seq[:, -1, :]
+            max_next_q = next_q.max(1)[0]
+
+        last_rewards = b_rewards[:, -1]
+        last_dones = b_dones[:, -1]
+        target_q = last_rewards + GAMMA * max_next_q * (1 - last_dones)
+
+        loss = F.smooth_l1_loss(curr_q_taken, target_q)
+
+        optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(policy_net.parameters(), 10.0)
+        optimizer.step()
+
+        return loss.item()
+
+    def steps_to_dict(steps):
+        return {int(agent_id): idx for idx, agent_id in enumerate(steps.agent_id)}
+
     try:
-        # Loop accounts for starting mid-way through resumed training
         for episode in range(start_episode, TOTAL_EPISODES + 1):
             env.reset()
+            buffer.finish_all_active_episodes()
             decision_steps, terminal_steps = env.get_steps(behavior_name)
-            tracked_agent = decision_steps.agent_id[0]
-            
-            state = decision_steps.obs[0][0]
-            hidden_state = None 
-            done = False
-            episode_reward = 0
-            step_count = 0
+
+            states_by_agent = {}
+            hidden_by_agent = {}
+            rewards_by_agent = {}
+            steps_by_agent = {}
+            terminals_by_agent = {}
             loss_sum = 0
             train_steps = 0
 
-            while not done:
-                # --- ACTION SELECTION ---
-                state_tensor = torch.tensor(state, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
-                
-                with torch.no_grad():
-                    q_values, new_hidden_state = policy_net(state_tensor, hidden_state)
-                
-                if random.random() < current_epsilon:
-                    action_int = random.randint(0, 2)
-                else:
-                    action_int = torch.argmax(q_values[0, -1]).item()
-                
-                hidden_state = new_hidden_state
+            for idx, agent_id in enumerate(decision_steps.agent_id):
+                agent_id = int(agent_id)
+                states_by_agent[agent_id] = decision_steps.obs[0][idx]
+                hidden_by_agent[agent_id] = None
+                rewards_by_agent[agent_id] = 0.0
+                steps_by_agent[agent_id] = 0
+                terminals_by_agent[agent_id] = 0
 
-                # --- STEP ENVIRONMENT ---
-                action_array = np.array([[action_int]], dtype=np.int32)
-                env.set_action_for_agent(behavior_name, tracked_agent, ActionTuple(discrete=action_array))
+            for rollout_step in range(ROLLOUT_STEPS):
+                actions_by_agent = {}
+                prev_states_by_agent = {}
+
+                for idx, agent_id in enumerate(decision_steps.agent_id):
+                    agent_id = int(agent_id)
+                    state = decision_steps.obs[0][idx]
+                    states_by_agent[agent_id] = state
+
+                    state_tensor = torch.tensor(state, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
+
+                    with torch.no_grad():
+                        q_values, new_hidden_state = policy_net(state_tensor, hidden_by_agent.get(agent_id))
+
+                    if random.random() < current_epsilon:
+                        action_int = random.randint(0, 3)
+                    else:
+                        action_int = torch.argmax(q_values[0, -1]).item()
+
+                    hidden_by_agent[agent_id] = new_hidden_state
+                    actions_by_agent[agent_id] = action_int
+                    prev_states_by_agent[agent_id] = state
+
+                    action_array = np.array([[action_int]], dtype=np.int32)
+                    env.set_action_for_agent(behavior_name, agent_id, ActionTuple(discrete=action_array))
+
+                if not actions_by_agent:
+                    break
+
                 env.step()
-                
-                decision_steps, terminal_steps = env.get_steps(behavior_name)
-                if tracked_agent in terminal_steps:
-                    next_state = terminal_steps.obs[0][0]
-                    reward = terminal_steps.reward[0]
-                    done = True
-                else:
-                    next_state = decision_steps.obs[0][0]
-                    reward = decision_steps.reward[0]
-                
-                episode_reward += reward
-                step_count += 1
+                next_decision_steps, terminal_steps = env.get_steps(behavior_name)
+                next_decision_idx = steps_to_dict(next_decision_steps)
+                terminal_idx = steps_to_dict(terminal_steps)
 
-                # --- TRAINING LOGIC (Skipped in Test Mode) ---
-                if MODE in ["train", "resume"]:
-                    buffer.push_transition(state, action_int, reward, next_state, done)
-                    
-                    batch = buffer.sample(BATCH_SIZE, SEQ_LEN)
-                    if batch:
-                        b_states, b_actions, b_rewards, b_next_states, b_dones = [b.to(device) for b in batch]
-                        
-                        curr_q_seq, _ = policy_net(b_states)
-                        curr_q = curr_q_seq[:, -1, :]
-                        last_actions = b_actions[:, -1].unsqueeze(-1)
-                        curr_q_taken = curr_q.gather(1, last_actions).squeeze(-1)
-                        
-                        with torch.no_grad():
-                            next_q_seq, _ = target_net(b_next_states)
-                            next_q = next_q_seq[:, -1, :]
-                            max_next_q = next_q.max(1)[0]
-                            
-                        last_rewards = b_rewards[:, -1]
-                        last_dones = b_dones[:, -1]
-                        target_q = last_rewards + GAMMA * max_next_q * (1 - last_dones)
-                        
-                        loss = F.smooth_l1_loss(curr_q_taken, target_q)
-                        
-                        optimizer.zero_grad()
-                        loss.backward()
-                        optimizer.step()
-                        
-                        loss_sum += loss.item()
-                        train_steps += 1
-                
-                state = next_state
+                for agent_id, action_int in actions_by_agent.items():
+                    if agent_id in terminal_idx:
+                        idx = terminal_idx[agent_id]
+                        next_state = terminal_steps.obs[0][idx]
+                        reward = float(terminal_steps.reward[idx])
+                        done = True
+                    elif agent_id in next_decision_idx:
+                        idx = next_decision_idx[agent_id]
+                        next_state = next_decision_steps.obs[0][idx]
+                        reward = float(next_decision_steps.reward[idx])
+                        done = False
+                    else:
+                        continue
 
-            # --- END OF EPISODE ---
-            print(f"Ep {episode:4d} | Reward: {episode_reward:6.2f} | Steps: {step_count:3d} | Epsilon: {current_epsilon:.2f}")
+                    rewards_by_agent[agent_id] = rewards_by_agent.get(agent_id, 0.0) + reward
+                    steps_by_agent[agent_id] = steps_by_agent.get(agent_id, 0) + 1
+
+                    if MODE in ["train", "resume"]:
+                        buffer.push_transition(agent_id, prev_states_by_agent[agent_id], action_int, reward, next_state, done)
+                        loss_value = optimize_model()
+                        if loss_value is not None:
+                            loss_sum += loss_value
+                            train_steps += 1
+
+                    if done:
+                        terminals_by_agent[agent_id] = terminals_by_agent.get(agent_id, 0) + 1
+                        states_by_agent.pop(agent_id, None)
+                        hidden_by_agent.pop(agent_id, None)
+                    else:
+                        states_by_agent[agent_id] = next_state
+
+                for idx, agent_id in enumerate(next_decision_steps.agent_id):
+                    agent_id = int(agent_id)
+                    if agent_id not in states_by_agent:
+                        states_by_agent[agent_id] = next_decision_steps.obs[0][idx]
+                        hidden_by_agent[agent_id] = None
+                        rewards_by_agent.setdefault(agent_id, 0.0)
+                        steps_by_agent.setdefault(agent_id, 0)
+                        terminals_by_agent.setdefault(agent_id, 0)
+
+                decision_steps = next_decision_steps
+
+            buffer.finish_all_active_episodes()
+
+            total_reward = sum(rewards_by_agent.values())
+            total_steps = sum(steps_by_agent.values())
+            avg_loss = loss_sum / train_steps if train_steps > 0 else 0
+            agent_summary = " | ".join(
+                f"A{agent_id}: R={rewards_by_agent.get(agent_id, 0.0):.1f}, T={terminals_by_agent.get(agent_id, 0)}"
+                for agent_id in sorted(rewards_by_agent.keys())
+            )
+            print(f"Ep {episode:4d} | TotalR: {total_reward:7.2f} | Steps: {total_steps:4d} | Eps: {current_epsilon:.2f} | {agent_summary}")
 
             if MODE in ["train", "resume"]:
-                # Log to Tensorboard
-                avg_loss = loss_sum / train_steps if train_steps > 0 else 0
-                writer.add_scalar("Training/Episode_Reward", episode_reward, episode)
-                writer.add_scalar("Training/Episode_Length", step_count, episode)
+                writer.add_scalar("Training/Total_Reward", total_reward, episode)
+                writer.add_scalar("Training/Total_Steps", total_steps, episode)
                 writer.add_scalar("Training/Avg_Loss", avg_loss, episode)
                 writer.add_scalar("Hyperparameters/Epsilon", current_epsilon, episode)
-                
-                # Epsilon Decay Logic
+
+                for agent_id, reward in rewards_by_agent.items():
+                    writer.add_scalar(f"Agents/{agent_id}_Reward", reward, episode)
+                    writer.add_scalar(f"Agents/{agent_id}_Terminals", terminals_by_agent.get(agent_id, 0), episode)
+
                 current_epsilon = max(EPSILON_MIN, current_epsilon * EPSILON_DECAY)
 
-                # Target Network Update
                 if episode % TARGET_UPDATE_FREQ == 0:
                     target_net.load_state_dict(policy_net.state_dict())
 
-                # Dynamic Checkpointing
-                if episode % (TOTAL_EPISODES/10) == 0:
+                checkpoint_interval = max(1, TOTAL_EPISODES // 10)
+                if episode % checkpoint_interval == 0:
                     model_name = f"drqn_ep{episode}_gamma{GAMMA}_eps{current_epsilon:.2f}_mem{buffer.total_frames_stored}.pth"
                     save_path = os.path.join("checkpoints", model_name)
                     torch.save({

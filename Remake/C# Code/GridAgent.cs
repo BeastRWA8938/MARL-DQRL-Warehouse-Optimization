@@ -20,8 +20,16 @@ public class GridAgent : Agent
     private GameObject carriedCargo;
 
     [Header("Agent State")]
+    public Vector2Int spawnGridPos = new Vector2Int(1, 0);
+    public int spawnFacingDirection = 0;
     public Vector2Int currentGridPos;
     public int facingDirection; // 0=N, 1=E, 2=S, 3=W
+    private bool hasCargo;
+
+    [Header("Stats Integration")]
+    public WarehouseStatsManager statsManager;
+    public string agentID = "A0"; // Set to A0 for Agent 1, A1 for Agent 2 in inspector
+    private int stepsSincePickup = 0;
 
     [Header("Reward Tuning")]
     public float rackPenalty = MinRackPenalty;
@@ -42,25 +50,39 @@ public class GridAgent : Agent
             targetLine.endWidth = 0.05f;
             targetLine.positionCount = 2;
         }
+        if (statsManager != null) 
+        {
+            statsManager.RegisterAgent(this, agentID);
+        }
+    }
+
+    public void Awake()
+    {
+        if (gridManager != null)
+        {
+            gridManager.RegisterAgent(this);
+        }
     }
 
     public override void OnEpisodeBegin()
     {
         // 1. Reset Phase
         currentPhase = AgentPhase.SeekCargo;
-        
-        // 2. Spawn new cargo
-        gridManager.SpawnNewCargo(); 
-        
-        // 3. Destroy currently held cargo if the episode timed out or failed
+        hasCargo = false;
+
+        // 2. Destroy currently held cargo if the episode timed out or failed
         if (carriedCargo != null) 
         {
             Destroy(carriedCargo);
+            carriedCargo = null;
         }
         
-        // 4. Reset Position (Agent spawns at X=1, Y=0 facing North)
-        currentGridPos = new Vector2Int(1, 0); 
-        facingDirection = 0;
+        // 3. Reset Position before selecting cargo so spawn cells are avoided
+        currentGridPos = spawnGridPos; 
+        facingDirection = spawnFacingDirection;
+
+        // 4. Spawn this agent's next cargo
+        gridManager.SpawnNewCargoForAgent(this);
         
         // 5. Update physical visuals instantly
         UpdatePhysicalPosition();
@@ -73,7 +95,7 @@ public class GridAgent : Agent
         sensor.AddObservation(currentPhase == AgentPhase.DeliverCargo ? 1.0f : 0.0f);
 
         // OBSERVATION 2 & 3: Global Target Coordinates (Normalized)
-        Vector2Int currentTarget = (currentPhase == AgentPhase.SeekCargo) ? gridManager.currentCargoLocation : gridManager.deliveryLocation;
+        Vector2Int currentTarget = (currentPhase == AgentPhase.SeekCargo) ? gridManager.GetCargoLocation(this) : gridManager.deliveryLocation;
         sensor.AddObservation((float)currentTarget.x / gridManager.cols); 
         sensor.AddObservation((float)currentTarget.y / gridManager.rows);
 
@@ -109,8 +131,12 @@ public class GridAgent : Agent
             {
                 tileState = 1.0f; 
             }
+            else if (gridManager.IsCellOccupiedByOtherAgent(globalVisionPos, this))
+            {
+                tileState = 4.0f; // 4 = Other Agent
+            }
             // Check Cargo (Only visible if we are seeking it)
-            else if (globalVisionPos == gridManager.currentCargoLocation && currentPhase == AgentPhase.SeekCargo)
+            else if (globalVisionPos == gridManager.GetCargoLocation(this) && currentPhase == AgentPhase.SeekCargo && gridManager.HasActiveCargo(this))
             {
                 tileState = 2.0f; 
             }
@@ -127,9 +153,17 @@ public class GridAgent : Agent
 
     public override void OnActionReceived(ActionBuffers actions)
     {
+        if (statsManager != null)
+        {
+            statsManager.IncrementGlobalStep();
+        }
+
+        if (currentPhase == AgentPhase.DeliverCargo) {
+            stepsSincePickup++;
+        }
         int action = actions.DiscreteActions[0];
         
-        Vector2Int currentTarget = (currentPhase == AgentPhase.SeekCargo) ? gridManager.currentCargoLocation : gridManager.deliveryLocation;
+        Vector2Int currentTarget = (currentPhase == AgentPhase.SeekCargo) ? gridManager.GetCargoLocation(this) : gridManager.deliveryLocation;
 
         // PBRS Phi(s) BEFORE action
         float phiS = CalculatePotential(currentGridPos, currentTarget);
@@ -140,15 +174,22 @@ public class GridAgent : Agent
         bool episodeEnded = false;
 
         // --- ACTION LOGIC ---
-        if (action == 1 || action == 2) 
+        // Actions 2 & 3: Rotations
+        if (action == 2 || action == 3) 
         {
-            RotateAgent(action == 1 ? 1 : -1);
+            RotateAgent(action == 2 ? 1 : -1);
             stepReward -= 0.05f; // Base step penalty
             shouldCalculatePBRS = false; 
         }
-        else if (action == 0) 
+        // Actions 0 & 1: Movement (Forward & Backward)
+        else if (action == 0 || action == 1) 
         {
-            Vector2Int nextPos = currentGridPos + GetForwardVector(facingDirection);
+            Vector2Int moveDir = GetForwardVector(facingDirection);
+            
+            // If Action 1 (Backward), invert the movement vector
+            if (action == 1) moveDir = new Vector2Int(-moveDir.x, -moveDir.y); 
+
+            Vector2Int nextPos = currentGridPos + moveDir;
 
             // Bounds Check
             if (nextPos.x < 0 || nextPos.x >= gridManager.cols || 
@@ -156,6 +197,17 @@ public class GridAgent : Agent
             {
                 stepReward -= 0.05f; // Base step penalty (Blocked)
                 shouldCalculatePBRS = false; // Do not calculate PBRS on OOB
+            }
+            else if (gridManager.IsCellOccupiedByOtherAgent(nextPos, this))
+            {
+                stepReward -= 0.1f;
+                AddReward(stepReward);
+                
+                // STATS LOGIC: Record teammate collision
+                if (statsManager != null) statsManager.RecordCollision();
+                
+                gridManager.HandleAgentCollision(this, gridManager.GetAgentAtCell(nextPos, this));
+                return;
             }
             else
             {
@@ -172,37 +224,43 @@ public class GridAgent : Agent
                     if (currentGridPos == gridManager.deliveryLocation)
                     {
                         stepReward -= emptyDropzonePenalty;
+                        if (statsManager != null) statsManager.RecordEmptyDrop();
                     }
 
-                    if (currentGridPos == gridManager.currentCargoLocation)
+                    if (currentGridPos == gridManager.GetCargoLocation(this))
                     {
-                        stepReward += 15.0f; // Pickup Sparse Reward
-                        currentPhase = AgentPhase.DeliverCargo;
-                        
-                        phaseChangedThisStep = true;
-                        shouldCalculatePBRS = false; // Block PBRS spike during target shift
-                        
-                        HandleVisualPickup(); 
+                        if (HandleVisualPickup())
+                        {
+                            stepReward += 15.0f; // Pickup Sparse Reward
+                            currentPhase = AgentPhase.DeliverCargo;
+                            stepsSincePickup = 0;
+                            
+                            phaseChangedThisStep = true;
+                            shouldCalculatePBRS = false; 
+                        }
                     }
                     else if (IsRackLocation(currentGridPos))
                     {
                         stepReward -= rackPenalty;
+                        if (statsManager != null) statsManager.RecordRackHit(this);
                     }
                 }
                 // --- PHASE 2 ---
                 else if (currentPhase == AgentPhase.DeliverCargo)
                 {
-                    if (currentGridPos == gridManager.deliveryLocation)
+                    if (currentGridPos == gridManager.deliveryLocation && hasCargo)
                     {
                         stepReward += 50.0f; // Delivery Success Sparse Reward
                         shouldCalculatePBRS = false; 
                         episodeEnded = true;
                         
+                        if (statsManager != null) statsManager.RecordDelivery(this, stepsSincePickup);
                         HandleVisualDrop(); 
                     }
                     else if (IsRackLocation(currentGridPos))
                     {
                         stepReward -= rackPenalty;
+                        if (statsManager != null) statsManager.RecordRackHit(this);
                     }
                 }
             }
@@ -289,29 +347,35 @@ public class GridAgent : Agent
         transform.position = gridManager.GridToWorld(currentGridPos); 
     }
 
-    private void HandleVisualPickup() 
+    private bool HandleVisualPickup() 
     { 
-        carriedCargo = gridManager.GrabActiveCargo();
+        carriedCargo = gridManager.TryPickupCargo(this, currentGridPos);
         if (carriedCargo != null)
         {
+            hasCargo = true;
             carriedCargo.transform.SetParent(holdPoint);
             carriedCargo.transform.localPosition = Vector3.zero;
             carriedCargo.transform.localRotation = Quaternion.identity;
+            return true;
         }
+
+        return false;
     }
 
     private void HandleVisualDrop() 
     { 
+        hasCargo = false;
         if (carriedCargo != null) 
         {
             Destroy(carriedCargo); 
+            carriedCargo = null;
         }
     }
 
     private void UpdateTargetAndLine()
     {
         if (targetLine == null) return;
-        Vector2Int currentTarget = (currentPhase == AgentPhase.SeekCargo) ? gridManager.currentCargoLocation : gridManager.deliveryLocation;
+        Vector2Int currentTarget = (currentPhase == AgentPhase.SeekCargo) ? gridManager.GetCargoLocation(this) : gridManager.deliveryLocation;
         Vector3 startPos = transform.position + Vector3.up * lineOffsetHeight;
         Vector3 endPos = gridManager.GridToWorld(currentTarget) + Vector3.up * lineOffsetHeight;
         

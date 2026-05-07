@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class DRQN(nn.Module):
-    def __init__(self, input_size=14, hidden_size=64, num_actions=3):
+    def __init__(self, input_size=14, hidden_size=64, num_actions=4):
         super(DRQN, self).__init__()
         self.fc1 = nn.Linear(input_size, hidden_size)
         self.lstm = nn.LSTM(input_size=hidden_size, hidden_size=hidden_size, batch_first=True)
