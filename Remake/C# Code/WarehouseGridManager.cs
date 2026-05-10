@@ -5,7 +5,7 @@ public class WarehouseGridManager : MonoBehaviour
 {
     [Header("Grid Dimensions")]
     public int rows = 10;
-    public int cols = 20;
+    public int cols = 10;
     public float surfaceLevelY = 0f;
 
     [Header("Fixed Zones")]
@@ -42,6 +42,8 @@ public class WarehouseGridManager : MonoBehaviour
 
     public Vector3 GridToWorld(Vector2Int gridPos)
     {
+        // Grid index (0,0) maps to world center (-4.5, -4.5);
+        // grid index (9,9) maps to world center (4.5, 4.5).
         return new Vector3(gridPos.x - 4.5f, surfaceLevelY + 0.5f, gridPos.y - 4.5f);
     }
 

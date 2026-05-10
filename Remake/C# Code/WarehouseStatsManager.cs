@@ -10,10 +10,22 @@ public class WarehouseStatsManager : MonoBehaviour
     [Header("UI Reference")]
     public TextMeshProUGUI statsTextDisplay;
 
+    [Header("On-Screen Stats Panel")]
+    public bool showStatsPanel = true;
+    public int panelX = 20;
+    public int panelY = 145;
+    public int panelWidth = 430;
+    public int panelHeight = 245;
+
     [Header("CSV Logging")]
     public bool enableCsvLogging = true;
     public string csvFileName = "warehouse_stats.csv";
     public int snapshotIntervalSteps = 100;
+    public int csvFlushIntervalRows = 250;
+
+    [Header("Summary Metrics CSV")]
+    public bool enableSummaryCsvLogging = true;
+    public string summaryCsvFileName = "warehouse_summary_metrics.csv";
 
     [Header("Global Metrics")]
     public int totalElapsedSteps = 0;
@@ -35,10 +47,19 @@ public class WarehouseStatsManager : MonoBehaviour
 
     private Dictionary<GridAgent, AgentStats> agentData = new Dictionary<GridAgent, AgentStats>();
     private string csvFilePath;
+    private string summaryCsvFilePath;
+    private string cachedUiText = "";
+    private StreamWriter csvWriter;
+    private StreamWriter summaryCsvWriter;
+    private int csvRowsSinceFlush = 0;
+    private int summaryCsvRowsSinceFlush = 0;
+    private float sessionStartRealtime;
 
     private void Start()
     {
+        sessionStartRealtime = Time.realtimeSinceStartup;
         InitializeCsvLog();
+        InitializeSummaryCsvLog();
         UpdateUI();
     }
 
@@ -103,7 +124,7 @@ public class WarehouseStatsManager : MonoBehaviour
 
     private void InitializeCsvLog()
     {
-        if (!enableCsvLogging) return;
+        if (!enableCsvLogging || csvWriter != null) return;
 
         csvFilePath = Path.Combine(Application.persistentDataPath, csvFileName);
         string directory = Path.GetDirectoryName(csvFilePath);
@@ -112,18 +133,39 @@ public class WarehouseStatsManager : MonoBehaviour
             Directory.CreateDirectory(directory);
         }
 
-        if (!File.Exists(csvFilePath))
+        bool needsHeader = !File.Exists(csvFilePath) || new FileInfo(csvFilePath).Length == 0;
+        csvWriter = new StreamWriter(csvFilePath, true);
+
+        if (needsHeader)
         {
-            File.AppendAllText(csvFilePath,
-                "timestamp,global_step,event,agent_id,team_deliveries,agent_deliveries,steps_since_pickup,avg_steps,best_steps,rack_hits,total_rack_hits,collisions,empty_drop_violations,delivery_rate,efficiency\n");
+            csvWriter.WriteLine("timestamp,global_step,event,agent_id,team_deliveries,agent_deliveries,steps_since_pickup,avg_steps,best_steps,rack_hits,total_rack_hits,collisions,empty_drop_violations,delivery_rate,efficiency");
+            csvWriter.Flush();
+        }
+    }
+
+    private void InitializeSummaryCsvLog()
+    {
+        if (!enableSummaryCsvLogging || summaryCsvWriter != null) return;
+
+        summaryCsvFilePath = Path.Combine(Application.persistentDataPath, summaryCsvFileName);
+        string directory = Path.GetDirectoryName(summaryCsvFilePath);
+        if (!string.IsNullOrEmpty(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
+
+        bool needsHeader = !File.Exists(summaryCsvFilePath) || new FileInfo(summaryCsvFilePath).Length == 0;
+        summaryCsvWriter = new StreamWriter(summaryCsvFilePath, true);
+
+        if (needsHeader)
+        {
+            summaryCsvWriter.WriteLine("Time(s),Total Deliveries,Efficiency(DPM),Agent Crashes,Rack Scrapes");
+            summaryCsvWriter.Flush();
         }
     }
 
     private void LogEvent(string eventName, GridAgent agent, int stepsSincePickup)
     {
-        if (!enableCsvLogging) return;
-        if (string.IsNullOrEmpty(csvFilePath)) InitializeCsvLog();
-
         AgentStats stats = null;
         if (agent != null && agentData.ContainsKey(agent))
         {
@@ -134,25 +176,74 @@ public class WarehouseStatsManager : MonoBehaviour
         float deliveryRate = GetDeliveryRate();
         float efficiency = GetEfficiency(totalRackHits);
 
-        string row = string.Join(",",
-            Csv(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)),
-            totalElapsedSteps.ToString(CultureInfo.InvariantCulture),
-            Csv(eventName),
-            Csv(stats != null ? stats.id : "TEAM"),
-            teamDeliveries.ToString(CultureInfo.InvariantCulture),
-            (stats != null ? stats.deliveries : 0).ToString(CultureInfo.InvariantCulture),
-            stepsSincePickup.ToString(CultureInfo.InvariantCulture),
-            FormatFloat(stats != null ? stats.AvgSteps : 0f),
-            (stats != null && stats.bestSteps != int.MaxValue ? stats.bestSteps : 0).ToString(CultureInfo.InvariantCulture),
-            (stats != null ? stats.rackHits : 0).ToString(CultureInfo.InvariantCulture),
-            totalRackHits.ToString(CultureInfo.InvariantCulture),
-            totalCollisions.ToString(CultureInfo.InvariantCulture),
-            emptyDropViolations.ToString(CultureInfo.InvariantCulture),
-            FormatFloat(deliveryRate),
-            FormatFloat(efficiency)
-        );
+        if (enableCsvLogging)
+        {
+            if (string.IsNullOrEmpty(csvFilePath)) InitializeCsvLog();
 
-        File.AppendAllText(csvFilePath, row + "\n");
+            string row = string.Join(",",
+                Csv(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)),
+                totalElapsedSteps.ToString(CultureInfo.InvariantCulture),
+                Csv(eventName),
+                Csv(stats != null ? stats.id : "TEAM"),
+                teamDeliveries.ToString(CultureInfo.InvariantCulture),
+                (stats != null ? stats.deliveries : 0).ToString(CultureInfo.InvariantCulture),
+                stepsSincePickup.ToString(CultureInfo.InvariantCulture),
+                FormatFloat(stats != null ? stats.AvgSteps : 0f),
+                (stats != null && stats.bestSteps != int.MaxValue ? stats.bestSteps : 0).ToString(CultureInfo.InvariantCulture),
+                (stats != null ? stats.rackHits : 0).ToString(CultureInfo.InvariantCulture),
+                totalRackHits.ToString(CultureInfo.InvariantCulture),
+                totalCollisions.ToString(CultureInfo.InvariantCulture),
+                emptyDropViolations.ToString(CultureInfo.InvariantCulture),
+                FormatFloat(deliveryRate),
+                FormatFloat(efficiency)
+            );
+
+            WriteCsvRow(csvWriter, row, ref csvRowsSinceFlush);
+        }
+
+        if (enableSummaryCsvLogging)
+        {
+            if (string.IsNullOrEmpty(summaryCsvFilePath)) InitializeSummaryCsvLog();
+
+            string summaryRow = string.Join(",",
+                FormatFloat(GetElapsedSeconds()),
+                teamDeliveries.ToString(CultureInfo.InvariantCulture),
+                FormatFloat(GetDeliveriesPerMinute()),
+                totalCollisions.ToString(CultureInfo.InvariantCulture),
+                totalRackHits.ToString(CultureInfo.InvariantCulture)
+            );
+
+            WriteCsvRow(summaryCsvWriter, summaryRow, ref summaryCsvRowsSinceFlush);
+        }
+    }
+
+    private void WriteCsvRow(StreamWriter writer, string row, ref int rowsSinceFlush)
+    {
+        if (writer == null) return;
+
+        writer.WriteLine(row);
+        rowsSinceFlush++;
+
+        if (csvFlushIntervalRows <= 1 || rowsSinceFlush >= csvFlushIntervalRows)
+        {
+            writer.Flush();
+            rowsSinceFlush = 0;
+        }
+    }
+
+    private void OnDestroy()
+    {
+        CloseWriter(ref csvWriter);
+        CloseWriter(ref summaryCsvWriter);
+    }
+
+    private void CloseWriter(ref StreamWriter writer)
+    {
+        if (writer == null) return;
+
+        writer.Flush();
+        writer.Dispose();
+        writer = null;
     }
 
     private int GetTotalRackHits()
@@ -169,6 +260,17 @@ public class WarehouseStatsManager : MonoBehaviour
     private float GetDeliveryRate()
     {
         return totalElapsedSteps == 0 ? 0f : (float)teamDeliveries / totalElapsedSteps;
+    }
+
+    private float GetElapsedSeconds()
+    {
+        return Mathf.Max(0f, Time.realtimeSinceStartup - sessionStartRealtime);
+    }
+
+    private float GetDeliveriesPerMinute()
+    {
+        float elapsedSeconds = GetElapsedSeconds();
+        return elapsedSeconds <= 0f ? 0f : teamDeliveries * 60f / elapsedSeconds;
     }
 
     private float GetEfficiency(int totalRackHits)
@@ -196,8 +298,16 @@ public class WarehouseStatsManager : MonoBehaviour
     // --- UI Formatting ---
     private void UpdateUI()
     {
-        if (statsTextDisplay == null) return;
+        cachedUiText = BuildStatsText();
 
+        if (statsTextDisplay != null)
+        {
+            statsTextDisplay.text = cachedUiText;
+        }
+    }
+
+    private string BuildStatsText()
+    {
         string uiText = "";
         int totalRackHits = GetTotalRackHits();
 
@@ -216,9 +326,37 @@ public class WarehouseStatsManager : MonoBehaviour
 
         uiText += $"Team Deliveries: {teamDeliveries}\n";
         uiText += $"Collisions: {totalCollisions}\n";
+        uiText += $"Rack Scrapes: {totalRackHits}\n";
+        uiText += $"Efficiency: {GetDeliveriesPerMinute():F2} DPM\n";
         uiText += $"Delivery Rate: {deliveryRate:F3} / step\n";
-        uiText += $"Efficiency: {efficiency:F1}%\n";
+        uiText += $"Score: {efficiency:F1}%\n";
 
-        statsTextDisplay.text = uiText;
+        return uiText;
+    }
+
+    // OnGUI mirrors the TimeController display style and does not depend on Canvas/TextMeshPro.
+    private void OnGUI()
+    {
+        if (!showStatsPanel || Application.isBatchMode)
+        {
+            return;
+        }
+
+        if (string.IsNullOrEmpty(cachedUiText))
+        {
+            cachedUiText = BuildStatsText();
+        }
+
+        GUI.Box(new Rect(panelX, panelY, panelWidth, panelHeight), "Warehouse Metrics");
+        GUI.Label(new Rect(panelX + 20, panelY + 28, panelWidth - 40, panelHeight - 55), cachedUiText);
+
+        if (enableCsvLogging)
+        {
+            GUI.Label(new Rect(panelX + 20, panelY + panelHeight - 28, panelWidth - 40, 20), $"CSV logging: {csvFileName}");
+        }
+        else if (enableSummaryCsvLogging)
+        {
+            GUI.Label(new Rect(panelX + 20, panelY + panelHeight - 28, panelWidth - 40, 20), $"CSV logging: {summaryCsvFileName}");
+        }
     }
 }

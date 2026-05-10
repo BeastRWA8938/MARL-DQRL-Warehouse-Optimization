@@ -20,10 +20,10 @@ if __name__ == '__main__':
     # 1. RUN MODE SETTINGS
     # ==========================================
     # Modes: "train" (start fresh), "resume" (continue training), "test" (watch inference)
-    MODE = "train" 
+    MODE = "test" 
     
     # Path to the .pth file you want to load for resuming or testing
-    LOAD_MODEL_PATH = "checkpoints/drqn_ep12000_gamma0.99_eps0.26_mem121537.pth" 
+    LOAD_MODEL_PATH = "checkpoints/drqn_ep10000_gamma0.99_eps0.10_mem64527_10x10_Grid_Working_But_Reverse_pickup_and_delivery.pth" 
 
     # ==========================================
     # 2. HYPERPARAMETERS
@@ -32,14 +32,15 @@ if __name__ == '__main__':
     LR = 1e-4
     BATCH_SIZE = 32
     SEQ_LEN = 10
-    TOTAL_EPISODES = 30000
-    ROLLOUT_STEPS = 250
+    TOTAL_EPISODES = 10000
+    ROLLOUT_STEPS = 200
+    TRAIN_EVERY_STEPS = 4
     TARGET_UPDATE_FREQ = 10 
 
     # --- Dynamic Epsilon Settings ---
     EPSILON_START = 1.0
-    EPSILON_MIN = 0.05
-    EPSILON_DECAY_PERCENTAGE = 0.9 # Epsilon hits minimum exactly at 80% of total episodes
+    EPSILON_MIN = 0.10
+    EPSILON_DECAY_PERCENTAGE = 1.0 # Keep exploration alive across the full run
 
     # Calculate exact exponential decay factor to hit minimum at the target episode
     decay_target_episodes = TOTAL_EPISODES * EPSILON_DECAY_PERCENTAGE
@@ -165,6 +166,7 @@ if __name__ == '__main__':
             terminals_by_agent = {}
             loss_sum = 0
             train_steps = 0
+            decision_count = 0
 
             for idx, agent_id in enumerate(decision_steps.agent_id):
                 agent_id = int(agent_id)
@@ -227,10 +229,12 @@ if __name__ == '__main__':
 
                     if MODE in ["train", "resume"]:
                         buffer.push_transition(agent_id, prev_states_by_agent[agent_id], action_int, reward, next_state, done)
-                        loss_value = optimize_model()
-                        if loss_value is not None:
-                            loss_sum += loss_value
-                            train_steps += 1
+                        decision_count += 1
+                        if decision_count % TRAIN_EVERY_STEPS == 0:
+                            loss_value = optimize_model()
+                            if loss_value is not None:
+                                loss_sum += loss_value
+                                train_steps += 1
 
                     if done:
                         terminals_by_agent[agent_id] = terminals_by_agent.get(agent_id, 0) + 1

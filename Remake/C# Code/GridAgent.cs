@@ -8,8 +8,18 @@ public class GridAgent : Agent
 {
     private const float Gamma = 0.99f;
     private const float ShapingScale = 0.2f;
-    private const float MinRackPenalty = 5.0f;
+    private const float InvalidMovePenalty = 1.0f;
+    private const float MinRackPenalty = 15.0f;
     private const float MinEmptyDropzonePenalty = 12.0f;
+    private const float MinReverseMovePenalty = 0.75f;
+    private static readonly Vector2Int[] RelativeVisionOffsets =
+    {
+        new Vector2Int(-1, 0),  // 1 Left
+        new Vector2Int(1, 0),   // 1 Right
+        new Vector2Int(0, -1),  // 1 Behind
+        new Vector2Int(0, 1),   // 1 Front
+        new Vector2Int(0, 2)    // 2 Front
+    };
 
     public enum AgentPhase { SeekCargo, DeliverCargo }
     public AgentPhase currentPhase = AgentPhase.SeekCargo;
@@ -34,6 +44,7 @@ public class GridAgent : Agent
     [Header("Reward Tuning")]
     public float rackPenalty = MinRackPenalty;
     public float emptyDropzonePenalty = MinEmptyDropzonePenalty;
+    public float reverseMovePenalty = MinReverseMovePenalty;
 
     [Header("Visuals")]
     public float lineOffsetHeight = 0.5f;
@@ -110,16 +121,7 @@ public class GridAgent : Agent
         }
 
         // OBSERVATIONS 10 to 14: Local Vision Array (5 floats)
-        Vector2Int[] relativeVisionList = new Vector2Int[]
-        {
-            new Vector2Int(-1, 0),  // 1 Left
-            new Vector2Int(1, 0),   // 1 Right
-            new Vector2Int(0, -1),  // 1 Behind
-            new Vector2Int(0, 1),   // 1 Front
-            new Vector2Int(0, 2)    // 2 Front
-        };
-
-        foreach (Vector2Int offset in relativeVisionList)
+        foreach (Vector2Int offset in RelativeVisionOffsets)
         {
             Vector2Int rotatedOffset = RotateVector(offset, facingDirection);
             Vector2Int globalVisionPos = currentGridPos + rotatedOffset;
@@ -144,6 +146,11 @@ public class GridAgent : Agent
             else if (globalVisionPos == gridManager.deliveryLocation)
             {
                 tileState = 3.0f; 
+            }
+            // 5 = Rack / cargo spawn cell. Own active cargo still takes priority above.
+            else if (IsRackLocation(globalVisionPos))
+            {
+                tileState = 5.0f;
             }
 
             sensor.AddObservation(tileState);
@@ -187,7 +194,11 @@ public class GridAgent : Agent
             Vector2Int moveDir = GetForwardVector(facingDirection);
             
             // If Action 1 (Backward), invert the movement vector
-            if (action == 1) moveDir = new Vector2Int(-moveDir.x, -moveDir.y); 
+            if (action == 1)
+            {
+                moveDir = new Vector2Int(-moveDir.x, -moveDir.y);
+                stepReward -= reverseMovePenalty;
+            }
 
             Vector2Int nextPos = currentGridPos + moveDir;
 
@@ -195,12 +206,12 @@ public class GridAgent : Agent
             if (nextPos.x < 0 || nextPos.x >= gridManager.cols || 
                 nextPos.y < 0 || nextPos.y >= gridManager.rows)
             {
-                stepReward -= 0.05f; // Base step penalty (Blocked)
+                stepReward -= InvalidMovePenalty;
                 shouldCalculatePBRS = false; // Do not calculate PBRS on OOB
             }
             else if (gridManager.IsCellOccupiedByOtherAgent(nextPos, this))
             {
-                stepReward -= 0.1f;
+                stepReward -= InvalidMovePenalty;
                 AddReward(stepReward);
                 
                 // STATS LOGIC: Record teammate collision
@@ -285,6 +296,11 @@ public class GridAgent : Agent
 
     void Update()
     {
+        if (Application.isBatchMode)
+        {
+            return;
+        }
+
         UpdateTargetAndLine();
     }
 
@@ -335,6 +351,7 @@ public class GridAgent : Agent
     {
         rackPenalty = Mathf.Max(rackPenalty, MinRackPenalty);
         emptyDropzonePenalty = Mathf.Max(emptyDropzonePenalty, MinEmptyDropzonePenalty);
+        reverseMovePenalty = Mathf.Max(reverseMovePenalty, MinReverseMovePenalty);
     }
 
     private bool IsRackLocation(Vector2Int gridPos)
